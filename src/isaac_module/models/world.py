@@ -1,30 +1,19 @@
-"""erh:isaac-sim:world - the generic component that owns the simulator.
+"""erh:isaac-sim:world - the module's link to a running Isaac Sim.
 
-Configure exactly one of these per machine. All other isaac-sim components
-name it in their "world" attribute; their validate_config returns it as an
-implicit dependency so viam-server boots the world first.
+Isaac Sim runs as its own process with the viam_isaac_server extension
+enabled (see the README); this component connects to it. Configure exactly
+one of these per machine. All other isaac-sim components name it in their
+"world" attribute; their validate_config returns it as an implicit
+dependency so viam-server connects the world first.
 
 Attributes:
   mock (bool, default false)        - run without isaac sim (for dev/testing)
-  headless (bool, default true)     - run kit without a local GUI window
-  livestream (bool, default true)   - enable WebRTC livestreaming (view with
-                                      the Isaac Sim WebRTC Streaming Client)
-  livestream_public_ip (string)     - IP advertised to streaming clients;
-                                      auto-detected if unset
-  livestream_width / _height (int)  - streamed resolution, default 1280x720
-  usd_stage (string)                - USD file/omniverse URL to open; if unset
-                                      an empty stage with a ground plane is used
-  isaac_default_environment (bool)  - default true. When false, skip Isaac's
-                                      default environment (which bundles a
-                                      floor collider AND the scene lighting)
-                                      and instead add a plain DistantLight +
-                                      DomeLight. Use this when the arm needs
-                                      to reach negative z; the default floor
-                                      otherwise pins it
-  physics_dt / rendering_dt (float) - sim step sizes, default 1/60
-  boot_timeout_sec (float)          - how long to wait for kit to boot
-  kit_log_level (string)            - kit console verbosity, default "warning"
-  props (list)                      - objects spawned into the scene at boot:
+  address (string)                  - host:port of the viam_isaac_server
+                                      extension, default localhost:47800
+  connect_timeout_sec (float)       - how long to wait for the extension to
+                                      answer, default 10
+  props (list)                      - objects spawned into the scene unless a
+                                      prim with that name already exists:
                                       {"name", "type": "cube"|"usd",
                                        "position": [x,y,z] meters,
                                        "size" (m), "scale" [sx,sy,sz],
@@ -38,6 +27,7 @@ DoCommand:
    "position": [x, y, z]}
 """
 
+import asyncio
 from typing import Any, ClassVar, Dict, Mapping, Optional, Sequence, Tuple
 
 from typing_extensions import Self
@@ -50,7 +40,24 @@ from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes, struct_to_dict
 
 from .. import FAMILY, NAMESPACE
-from ..sim_manager import SimConfig, SimManager
+from ..protocol import parse_address
+from ..sim_manager import DEFAULT_ADDRESS, SimConfig, SimManager
+
+# attributes from when the module launched isaac sim itself; they now belong
+# to whoever launches it
+_LAUNCH_ATTRIBUTES = (
+    "headless",
+    "livestream",
+    "livestream_public_ip",
+    "livestream_width",
+    "livestream_height",
+    "usd_stage",
+    "physics_dt",
+    "rendering_dt",
+    "boot_timeout_sec",
+    "kit_log_level",
+    "isaac_default_environment",
+)
 
 
 class IsaacWorld(Generic, EasyResource):
@@ -69,37 +76,31 @@ class IsaacWorld(Generic, EasyResource):
         cls, config: ComponentConfig
     ) -> Tuple[Sequence[str], Sequence[str]]:
         attrs = struct_to_dict(config.attributes)
-        for key in (
-            "physics_dt",
-            "rendering_dt",
-            "boot_timeout_sec",
-            "livestream_width",
-            "livestream_height",
-        ):
-            if key in attrs and float(attrs[key]) <= 0:
-                raise ValueError(f"{key} must be positive")
+        parse_address(str(attrs.get("address", DEFAULT_ADDRESS)))
+        if "connect_timeout_sec" in attrs and float(attrs["connect_timeout_sec"]) <= 0:
+            raise ValueError("connect_timeout_sec must be positive")
+        if not isinstance(attrs.get("props", []), list):
+            raise ValueError("props must be a list")
         return [], []
 
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
         attrs = struct_to_dict(config.attributes)
+        ignored = [key for key in _LAUNCH_ATTRIBUTES if key in attrs]
+        if ignored:
+            self.logger.warning(
+                "ignoring %s: isaac sim runs in its own process now, so set these "
+                "when launching it",
+                ", ".join(ignored),
+            )
         cfg = SimConfig(
             mock=bool(attrs.get("mock", False)),
-            headless=bool(attrs.get("headless", True)),
-            livestream=bool(attrs.get("livestream", True)),
-            usd_stage=attrs.get("usd_stage") or None,
-            physics_dt=float(attrs.get("physics_dt", 1.0 / 60.0)),
-            rendering_dt=float(attrs.get("rendering_dt", 1.0 / 60.0)),
-            boot_timeout=float(attrs.get("boot_timeout_sec", 300.0)),
-            kit_log_level=str(attrs.get("kit_log_level", "warning")),
-            livestream_public_ip=str(attrs.get("livestream_public_ip", "")),
-            livestream_width=int(attrs.get("livestream_width", 1280)),
-            livestream_height=int(attrs.get("livestream_height", 720)),
+            address=str(attrs.get("address", DEFAULT_ADDRESS)),
+            connect_timeout=float(attrs.get("connect_timeout_sec", 10.0)),
             props=[dict(p) for p in attrs.get("props", [])],
-            isaac_default_environment=bool(attrs.get("isaac_default_environment", True)),
         )
-        SimManager.get().ensure_booted(cfg)
+        SimManager.get().configure(cfg)
 
     async def do_command(
         self,
@@ -111,15 +112,15 @@ class IsaacWorld(Generic, EasyResource):
         sim = SimManager.get()
         cmd = str(command.get("command", ""))
         if cmd == "status":
-            return sim.status()
+            return await asyncio.to_thread(sim.status)
         if cmd == "play":
-            sim.play()
+            await asyncio.to_thread(sim.play)
             return {"ok": True}
         if cmd == "pause":
-            sim.pause()
+            await asyncio.to_thread(sim.pause)
             return {"ok": True}
         if cmd == "reset":
-            sim.reset()
+            await asyncio.to_thread(sim.reset)
             return {"ok": True}
         if cmd == "add_usd":
             usd_path = str(command.get("usd_path", ""))
@@ -127,8 +128,11 @@ class IsaacWorld(Generic, EasyResource):
             if not usd_path or not prim_path:
                 raise ValueError("add_usd requires usd_path and prim_path")
             position = command.get("position") or [0.0, 0.0, 0.0]
-            sim.add_usd_reference(
-                usd_path, prim_path, tuple(float(v) for v in position)
+            await asyncio.to_thread(
+                sim.add_usd_reference,
+                usd_path,
+                prim_path,
+                tuple(float(v) for v in position),
             )
             return {"ok": True}
         raise ValueError(

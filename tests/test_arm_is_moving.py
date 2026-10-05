@@ -2,7 +2,6 @@
 
 import asyncio
 import math
-import threading
 
 import pytest
 from viam.components.arm import JointPositions
@@ -11,7 +10,6 @@ from viam.utils import dict_to_struct
 
 from isaac_module.models.arm import IsaacArm
 from isaac_module.models.world import IsaacWorld
-from isaac_module.sim_manager import SimManager
 
 
 def _config(name: str, attrs: dict) -> ComponentConfig:
@@ -19,17 +17,7 @@ def _config(name: str, attrs: dict) -> ComponentConfig:
 
 
 @pytest.fixture(scope="module")
-def sim():
-    manager = SimManager.get()
-    t = threading.Thread(target=manager.main_loop, daemon=True)
-    t.start()
-    yield manager
-    manager.request_stop()
-    t.join(timeout=5)
-
-
-@pytest.fixture(scope="module")
-def world(sim):
+def world():
     return IsaacWorld.new(_config("sim-world", {"mock": True}), {})
 
 

@@ -22,7 +22,6 @@ Attributes:
 """
 
 import asyncio
-from io import BytesIO
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from typing_extensions import Self
@@ -76,16 +75,8 @@ class IsaacCamera(Camera, EasyResource):
         return self._handle
 
     def _encode(self, mime_type: str = "") -> ViamImage:
-        from PIL import Image
-
-        arr = self._h().get_rgb()
-        img = Image.fromarray(arr, mode="RGB")
-        buf = BytesIO()
-        if mime_type == CameraMimeType.PNG:
-            img.save(buf, format="PNG")
-            return ViamImage(buf.getvalue(), CameraMimeType.PNG)
-        img.save(buf, format="JPEG", quality=90)
-        return ViamImage(buf.getvalue(), CameraMimeType.JPEG)
+        data, mime = self._h().get_image(mime_type)
+        return ViamImage(data, CameraMimeType.from_string(mime))
 
     async def get_image(self, mime_type: str = "", **kwargs) -> ViamImage:
         return await asyncio.to_thread(self._encode, mime_type)

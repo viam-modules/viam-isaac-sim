@@ -6,21 +6,24 @@ A [Viam](https://www.viam.com) module for controlling and simulating robots in
 What it is/does
 ====
 * Lets you use Viam to control robots in NVIDIA Isaac Sim
-* Models
-  * Core simulator model (`world`) that configures the world and runs Isaac Sim
-  * A model for each arm, camera, base or other component you want to control/simulate from Viam
+* Two pieces
+  * `viam_isaac_server`, an Isaac Sim (Kit) extension in [`exts/`](exts/), that
+    runs inside your Isaac Sim and serves the module
+  * the Viam module: a core model (`world`) that connects to that extension,
+    plus a model for each arm, camera, base or other component you want to
+    control from Viam
 * User does:
-  * creates the core sim/world component in Viam
+  * launches Isaac Sim however they like, with the extension enabled
+  * creates the world component in Viam, pointing at that Isaac Sim
   * adds their components, e.g. an arm with `"asset": "ur20"`
-  * the world model starts the sim and the component models spawn the right prims
-  * views the simulator via the built-in WebRTC livestream or through Viam camera components
+  * the component models attach to prims already in the stage, or spawn them
   * controls robots and sees cameras through the normal Viam APIs
 
 ## Models
 
 | Model | Viam API | What it does |
 |---|---|---|
-| `erh:isaac-sim:world` | `generic` | Boots Isaac Sim, opens the USD stage, runs the sim loop. Configure exactly one. |
+| `erh:isaac-sim:world` | `generic` | Connects to a running Isaac Sim through the `viam_isaac_server` extension. Configure exactly one. |
 | `erh:isaac-sim:arm` | `arm` | Spawns (or attaches to) an articulation - UR arms, Franka, or any USD - and exposes joint control. |
 | `erh:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves its RGB frames. |
 | `erh:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
@@ -39,8 +42,7 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
       "model": "erh:isaac-sim:world",
       "type": "generic",
       "attributes": {
-        "headless": true,
-        "livestream": true
+        "address": "localhost:47800"
       }
     },
     {
@@ -100,15 +102,14 @@ overrides orientation to aim at a point.
 
 | attribute | default | notes |
 |---|---|---|
-| `mock` | `false` | run without Isaac Sim installed (development/testing) |
-| `headless` | `true` | no local GUI window |
-| `livestream` | `true` | serve the Isaac Sim WebRTC Streaming Client (headless only) |
-| `livestream_public_ip` | _auto-detected_ | IP advertised to streaming clients |
-| `livestream_width` / `livestream_height` | `1280` / `720` | streamed resolution |
-| `usd_stage` | _empty stage + ground plane_ | USD file or omniverse:// URL to open |
-| `physics_dt` / `rendering_dt` | `1/60` | step sizes in seconds |
-| `boot_timeout_sec` | `300` | Isaac Sim can take a while on first boot |
-| `kit_log_level` | `warning` | kit console verbosity |
+| `mock` | `false` | run without Isaac Sim (development/testing) |
+| `address` | `localhost:47800` | `host:port` of the `viam_isaac_server` extension |
+| `connect_timeout_sec` | `10` | how long to wait for the extension to answer |
+| `props` | _none_ | objects to add to the scene (see the pick-and-place fragment) |
+
+How Isaac Sim itself runs (headless, livestream, stage, physics rates) is up
+to whoever launches it; the old launch attributes (`headless`, `livestream*`,
+`usd_stage`, `physics_dt`, ...) are ignored with a warning.
 
 The world also supports `DoCommand`: `{"command": "status" | "play" | "pause" |
 "reset"}` and `{"command": "add_usd", "usd_path": "...", "prim_path":
@@ -138,6 +139,20 @@ motion service.
 or `position` plus `target` (aim-at point) or `orientation_rpy_deg` to create
 one. `width`/`height` default to 640x480.
 
+### existing prims
+
+The extension never opens a stage, steps physics or resets the world on its
+own - the stage is Isaac Sim's. Each component attaches to the prim at its
+`prim_path` (default `/World/<component name>`) if one exists, and only spawns
+its `asset`/`usd_path` when it doesn't, so restarts and reconfigures never
+duplicate anything. Existing prims are left where they are; the module logs a
+warning when that disagrees with the component's frame config. Props likewise
+are only added when no prim with their name exists.
+
+Arms and bases need the simulation playing: press Play in Isaac Sim or send
+the world `{"command": "play"}`. If Isaac Sim restarts or opens a new stage,
+the module reconnects and re-attaches on the next call.
+
 ### base attributes
 
 `world` (required), `asset` (e.g. `jetbot`, which brings wheel defaults) or
@@ -149,77 +164,86 @@ one. `width`/`height` default to 640x480.
 The `isaac-sim-pick-and-place` fragment (source in
 `fragments/pick-and-place.json`) is a ready-made scene: a UR20 (`pick-arm`)
 at the origin, a red 6cm cube to pick up, a flat blue pad to place it on, and
-a `scene-cam` watching the workspace. Add the fragment to any machine that
-meets the requirements above and the world spawns everything at boot.
+a `scene-cam` watching the workspace. Add the fragment to a machine whose
+Isaac Sim is running the extension and everything is spawned on connect. The
+stage needs a ground plane (e.g. Create > Physics > Ground Plane) or the cube
+falls forever.
 
 Props are configured on the world with the `props` attribute (cubes or USD
 references, fixed or dynamic) - see the fragment for the shape of it.
+
+## Running Isaac Sim with the extension
+
+The extension lives in [`exts/viam_isaac_server`](exts/viam_isaac_server)
+and needs Isaac Sim 4.5 or newer. Copy this repo's `exts/` directory to the
+Isaac Sim machine and add it when launching:
+
+```sh
+./isaac-sim.sh --ext-folder /path/to/viam-isaac-sim/exts --enable viam_isaac_server
+```
+
+Any Kit launch takes the same flags, e.g. a headless livestreaming one. To
+enable it from a standalone Python script instead, after creating the
+`SimulationApp`:
+
+```python
+import omni.kit.app
+
+manager = omni.kit.app.get_app().get_extension_manager()
+manager.add_path("/path/to/viam-isaac-sim/exts")
+manager.set_extension_enabled_immediate("viam_isaac_server", True)
+```
+
+The extension handles requests between app updates, so a standalone script
+must keep updating the app (`simulation_app.update()`, or
+`world.step(render=True)`).
+
+It listens on `127.0.0.1:47800`. If the module runs on a different machine,
+make it listen on a reachable interface:
+
+```sh
+--/exts/viam_isaac_server/host=0.0.0.0 --/exts/viam_isaac_server/port=47800
+```
+
+There is no authentication, so only do that on a trusted network.
 
 ## Viewing the simulator
 
 * **Through Viam (recommended)**: add an `erh:isaac-sim:camera` component with
   `position` + `target` (see the example config) and watch it in the Viam app
   like any other camera - control tab, data capture, SDKs, everything works.
-* **Full interactive viewport**: install NVIDIA's
-  [Isaac Sim WebRTC Streaming Client](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/manual_livestream_clients.html)
-  and connect it to the sim machine's IP (plain IP, no port - TCP 49100 and
-  UDP 47998 are hardcoded and must be reachable). If the machine has multiple
-  interfaces, set `livestream_public_ip` on the world.
-* **Local GUI**: set `"headless": false` on the world (needs a display on the
-  sim machine).
+* **Isaac Sim itself**: its own window, or NVIDIA's
+  [livestream clients](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/manual_livestream_clients.html)
+  if you launched it headless with streaming.
 
 ## How it works
 
-Isaac Sim's Python API only runs inside Isaac Sim's own interpreter, and
-Omniverse Kit wants to own the thread it runs on. So:
+* The extension runs inside Isaac Sim. It accepts connections on a
+  background thread and handles each request on Kit's main thread, the only
+  place Isaac's APIs may be called.
+* The module is plain Python with no Isaac dependency. Every component call
+  becomes a request to the extension over one TCP connection (the format is
+  in `protocol.py`, a file shared by both sides).
+* All models in the module share that connection through a singleton, so
+  arms/cameras/bases just name their world component and get attached.
 
-* `run.sh` launches the module with Isaac Sim's bundled python (found via
-  `$ISAAC_SIM_PATH/python.sh` or `$ISAAC_PYTHON`), installing `viam-sdk` into
-  it on first run.
-* The **main thread** runs the simulation loop (`SimulationApp` boot, stepping,
-  and a task queue). The **Viam module server** runs on a side thread; all
-  component calls are marshalled onto the sim thread.
-* All models live in one module process and share the sim through a singleton,
-  so arms/cameras/bases just name their world component and get attached.
+## Machine requirements
 
-## Machine requirements & automatic setup
+**The module** runs anywhere viam-server and Python 3.11 do; `first_run.sh`
+installs [uv](https://docs.astral.sh/uv/) and the module's dependencies.
 
-On a standard Ubuntu 22.04/24.04 x86_64 machine, the module sets itself up:
-when first installed, viam-server runs `first_run.sh`, which installs the
-system libraries kit needs (vulkan/GL), the right python (via deadsnakes on
-24.04), an NVIDIA driver if none is present (the validated 580 branch - newer
-is not better here, see below), and Isaac Sim itself
-(pip-installed into a venv under the module's data directory - 4.5.0 on
-22.04, 5.0.0 on 24.04). `run.sh` finds that install automatically; the EULA
-is accepted via environment variable.
+**Isaac Sim** you install and run yourself, on the same machine or another
+one the module can reach on TCP 47800:
 
-Notes on the automatic setup:
-
-* The Isaac Sim download is 10GB+. If it exceeds viam-server's default
-  first-run timeout, set `"first_run_timeout": "2h0m0s"` on the module entry
-  in your machine config.
-* If the script had to install the NVIDIA driver, **reboot** before
-  configuring the world component.
-* Already have Isaac Sim? Set `ISAAC_SIM_PATH` (dir containing `python.sh`)
-  or `ISAAC_PYTHON` in the module's environment variables and the script
-  skips everything.
-
-What the machine must already be/have (the script can't do these for you):
-
-* Ubuntu 22.04 or 24.04 on x86_64 with an RTX-capable NVIDIA GPU (8GB+ VRAM
-  minimum, RTX 4080+/L40 recommended), 32GB+ RAM, ~60GB free disk. See
-  NVIDIA's [requirements](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/requirements.html).
+* Ubuntu 22.04/24.04 on x86_64 with an RTX-capable NVIDIA GPU (8GB+ VRAM
+  minimum, RTX 4080+/L40 recommended), 32GB+ RAM. See NVIDIA's
+  [requirements](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/requirements.html).
 * An NVIDIA driver from a branch Isaac Sim validates against - **use the 580
   branch**. Newer branches (590/595+) are known to crash Isaac's RTX renderer
   on startup (`librtx.scenedb.plugin.so`) and break CUDA init
   (`cuDeviceGetUuid` Warp errors); see
   [isaac-sim/IsaacSim#537](https://github.com/isaac-sim/IsaacSim/issues/537).
   If you're on 595+: `sudo apt-get install -y nvidia-driver-580 && sudo reboot`.
-* viam-server installed, machine online in the Viam app, running as root (or
-  a user with passwordless sudo) for the apt/driver steps.
-* Network access to pypi.nvidia.com, pypi.org, and NVIDIA's asset servers.
-* Open ports for the livestream viewer if you want it: TCP 49100 (signaling)
-  plus UDP 47998 (media) - both hardcoded in NVIDIA's streaming client.
 
 No GPU/Isaac at all? `"mock": true` on the world runs the module anywhere for
 development.
@@ -238,7 +262,8 @@ python3 -m venv .venv
 
 ## Status / roadmap
 
-- [x] world boot, stage loading, livestream, play/pause/reset, add_usd
+- [x] run against an Isaac Sim you launch (`viam_isaac_server` extension)
+- [x] play/pause/reset, add_usd, props
 - [x] arm joint control (UR family, Franka, arbitrary USD articulations)
 - [x] RGB cameras
 - [x] differential-drive bases
