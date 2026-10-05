@@ -1,0 +1,28 @@
+[package]
+version = "0.1.0"
+title = "Viam Isaac Sim Server"
+description = "Lets the erh:isaac-sim viam module drive arms, cameras and bases in this running Isaac Sim."
+category = "Simulation"
+keywords = ["viam", "robotics"]
+repository = "https://github.com/erh/viam-isaac-sim"
+
+[dependencies]
+"omni.physx" = {}
+"omni.timeline" = {}
+"omni.usd" = {}
+"isaacsim.core.api" = {}
+"isaacsim.core.prims" = {}
+"isaacsim.core.utils" = {}
+"isaacsim.sensors.camera" = {}
+"isaacsim.robot.wheeled_robots" = {}
+"isaacsim.storage.native" = {}
+
+[[python.module]]
+name = "viam_isaac_server"
+
+[settings]
+# 127.0.0.1 keeps the server private to this machine. To serve a module on
+# another machine, set an interface address (or 0.0.0.0) - there is no
+# authentication, so only do that on a trusted network.
+exts."viam_isaac_server".host = "127.0.0.1"
+exts."viam_isaac_server".port = 47800

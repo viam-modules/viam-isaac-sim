@@ -1,10 +1,8 @@
-"""End-to-end test of the module in mock mode: boots the SimManager on a
-background thread (standing in for the process main thread) and exercises
-the viam component models against it."""
+"""End-to-end test of the module in mock mode: exercises the viam component
+models against the in-process mock backend."""
 
 import asyncio
 import math
-import threading
 
 import pytest
 from viam.proto.app.robot import ComponentConfig
@@ -15,7 +13,6 @@ from isaac_module.models.arm import IsaacArm, _densify
 from isaac_module.models.base import IsaacBase
 from isaac_module.models.camera import IsaacCamera
 from isaac_module.models.world import IsaacWorld
-from isaac_module.sim_manager import SimManager
 
 
 def _config(name: str, attrs: dict) -> ComponentConfig:
@@ -23,23 +20,13 @@ def _config(name: str, attrs: dict) -> ComponentConfig:
 
 
 @pytest.fixture(scope="module")
-def sim():
-    manager = SimManager.get()
-    t = threading.Thread(target=manager.main_loop, daemon=True)
-    t.start()
-    yield manager
-    manager.request_stop()
-    t.join(timeout=5)
-
-
-@pytest.fixture(scope="module")
-def world(sim):
+def world():
     return IsaacWorld.new(_config("sim-world", {"mock": True}), {})
 
 
-def test_world_boots_and_status(world):
+def test_world_configures_and_status(world):
     status = asyncio.run(world.do_command({"command": "status"}))
-    assert status["booted"] is True
+    assert status["configured"] is True
     assert status["mock"] is True
 
 

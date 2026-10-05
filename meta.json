@@ -7,7 +7,7 @@
     {
       "model": "erh:isaac-sim:world",
       "api": "rdk:component:generic",
-      "short_description": "Boots and manages the Isaac Sim world/stage"
+      "short_description": "Connects to a running Isaac Sim (viam_isaac_server extension)"
     },
     {
       "model": "erh:isaac-sim:arm",

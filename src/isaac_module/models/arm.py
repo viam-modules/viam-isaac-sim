@@ -56,7 +56,7 @@ from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes
 
 from .. import FAMILY, NAMESPACE
-from ..sim_manager import KNOWN_ASSETS, ArmHandle, SimManager
+from ..sim_manager import KNOWN_KINEMATICS, ArmHandle, SimManager
 from ..spatial import quat_to_ov
 from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
@@ -269,10 +269,7 @@ class IsaacArm(Arm, EasyResource):
         url = self._attrs.get("kinematics_url")
         if url:
             return str(url)
-        asset = self._attrs.get("asset")
-        if asset and asset in KNOWN_ASSETS:
-            return KNOWN_ASSETS[asset].get("kinematics")
-        return None
+        return KNOWN_KINEMATICS.get(self._attrs.get("asset") or "")
 
     def _load_kinematics(self) -> Tuple[KinematicsFileFormat.ValueType, bytes]:
         url = self._kinematics_url()

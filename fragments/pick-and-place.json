@@ -14,8 +14,6 @@
       "type": "generic",
       "model": "erh:isaac-sim:world",
       "attributes": {
-        "headless": true,
-        "livestream": true,
         "props": [
           {
             "name": "pick_cube",
