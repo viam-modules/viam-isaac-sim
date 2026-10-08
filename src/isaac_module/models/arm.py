@@ -1,7 +1,7 @@
-"""erh:isaac-sim:arm - a simulated arm.
+"""viam-labs:isaac-sim:arm - a simulated arm.
 
 Attributes:
-  world (string, required)         - name of the erh:isaac-sim:world component
+  world (string, required)         - name of the viam-labs:isaac-sim:world component
   asset (string)                   - known robot, e.g. "ur20", "ur10", "franka"
   usd_path (string)                - explicit USD to spawn instead of a known asset
   prim_path (string)               - where to place it (default /World/<name>), or

@@ -20,10 +20,10 @@ What it is/does
 
 | Model | Viam API | What it does |
 |---|---|---|
-| `erh:isaac-sim:world` | `generic` | Boots Isaac Sim, opens the USD stage, runs the sim loop. Configure exactly one. |
-| `erh:isaac-sim:arm` | `arm` | Spawns (or attaches to) an articulation - UR arms, Franka, or any USD - and exposes joint control. |
-| `erh:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves its RGB frames. |
-| `erh:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
+| `viam-labs:isaac-sim:world` | `generic` | Boots Isaac Sim, opens the USD stage, runs the sim loop. Configure exactly one. |
+| `viam-labs:isaac-sim:arm` | `arm` | Spawns (or attaches to) an articulation - UR arms, Franka, or any USD - and exposes joint control. |
+| `viam-labs:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves its RGB frames. |
+| `viam-labs:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
 
 Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
 `ur10e`, `ur16e`, `ur20`, `franka`, `jetbot`. Anything else can be loaded with
@@ -36,7 +36,7 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
   "components": [
     {
       "name": "sim-world",
-      "model": "erh:isaac-sim:world",
+      "model": "viam-labs:isaac-sim:world",
       "type": "generic",
       "attributes": {
         "headless": true,
@@ -45,7 +45,7 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
     },
     {
       "name": "my-ur20",
-      "model": "erh:isaac-sim:arm",
+      "model": "viam-labs:isaac-sim:arm",
       "type": "arm",
       "frame": { "parent": "world" },
       "attributes": {
@@ -55,7 +55,7 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
     },
     {
       "name": "overhead-cam",
-      "model": "erh:isaac-sim:camera",
+      "model": "viam-labs:isaac-sim:camera",
       "type": "camera",
       "frame": {
         "parent": "world",
@@ -70,7 +70,7 @@ Known assets (usable via the `asset` attribute): `ur3e`, `ur5e`, `ur10`,
     },
     {
       "name": "my-jetbot",
-      "model": "erh:isaac-sim:base",
+      "model": "viam-labs:isaac-sim:base",
       "type": "base",
       "frame": {
         "parent": "world",
@@ -157,7 +157,7 @@ references, fixed or dynamic) - see the fragment for the shape of it.
 
 ## Viewing the simulator
 
-* **Through Viam (recommended)**: add an `erh:isaac-sim:camera` component with
+* **Through Viam (recommended)**: add an `viam-labs:isaac-sim:camera` component with
   `position` + `target` (see the example config) and watch it in the Viam app
   like any other camera - control tab, data capture, SDKs, everything works.
 * **Full interactive viewport**: install NVIDIA's

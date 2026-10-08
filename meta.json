@@ -1,26 +1,26 @@
 {
-  "module_id": "erh:isaac-sim",
+  "module_id": "viam-labs:isaac-sim",
   "visibility": "public",
-  "url": "https://github.com/erh/viam-isaac-sim",
+  "url": "https://github.com/viam-modules/viam-isaac-sim",
   "description": "Control and simulate robots in NVIDIA Isaac Sim through Viam",
   "models": [
     {
-      "model": "erh:isaac-sim:world",
+      "model": "viam-labs:isaac-sim:world",
       "api": "rdk:component:generic",
       "short_description": "Boots and manages the Isaac Sim world/stage"
     },
     {
-      "model": "erh:isaac-sim:arm",
+      "model": "viam-labs:isaac-sim:arm",
       "api": "rdk:component:arm",
       "short_description": "A simulated arm (UR, Franka, or any articulation USD)"
     },
     {
-      "model": "erh:isaac-sim:camera",
+      "model": "viam-labs:isaac-sim:camera",
       "api": "rdk:component:camera",
       "short_description": "A simulated RGB camera in the Isaac Sim stage"
     },
     {
-      "model": "erh:isaac-sim:base",
+      "model": "viam-labs:isaac-sim:base",
       "api": "rdk:component:base",
       "short_description": "A simulated differential-drive base"
     }

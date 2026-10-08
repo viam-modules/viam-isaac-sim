@@ -69,7 +69,7 @@ def validate_sim_component(
     if not world or not isinstance(world, str):
         raise ValueError(
             f'{config.name}: set the "world" attribute to the name of your '
-            "erh:isaac-sim:world component"
+            "viam-labs:isaac-sim:world component"
         )
     if needs_source and not (
         attrs.get("asset") or attrs.get("usd_path") or attrs.get("prim_path")

@@ -1,2 +1,2 @@
-NAMESPACE = "erh"
+NAMESPACE = "viam-labs"
 FAMILY = "isaac-sim"

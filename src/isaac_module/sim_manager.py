@@ -369,7 +369,7 @@ class SimManager:
         if not self._booted.is_set():
             raise RuntimeError(
                 "isaac sim world is not running - configure a "
-                "erh:isaac-sim:world component and depend on it"
+                "viam-labs:isaac-sim:world component and depend on it"
             )
         if self._boot_error is not None:
             raise RuntimeError(f"isaac sim failed to boot: {self._boot_error}")

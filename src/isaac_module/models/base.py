@@ -1,7 +1,7 @@
-"""erh:isaac-sim:base - a simulated differential-drive base.
+"""viam-labs:isaac-sim:base - a simulated differential-drive base.
 
 Attributes:
-  world (string, required)     - name of the erh:isaac-sim:world component
+  world (string, required)     - name of the viam-labs:isaac-sim:world component
   asset (string)               - known robot, e.g. "jetbot" (brings sensible
                                  wheel defaults)
   usd_path (string)            - explicit robot USD to spawn
