@@ -1,4 +1,4 @@
-"""erh:isaac-sim:world - the generic component that owns the simulator.
+"""viam-labs:isaac-sim:world - the generic component that owns the simulator.
 
 Configure exactly one of these per machine. All other isaac-sim components
 name it in their "world" attribute; their validate_config returns it as an

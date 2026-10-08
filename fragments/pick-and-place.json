@@ -2,8 +2,8 @@
   "modules": [
     {
       "type": "registry",
-      "name": "erh_isaac-sim",
-      "module_id": "erh:isaac-sim",
+      "name": "viam-labs_isaac-sim",
+      "module_id": "viam-labs:isaac-sim",
       "version": "latest-with-prerelease"
     }
   ],
@@ -12,7 +12,7 @@
       "name": "sim-world",
       "namespace": "rdk",
       "type": "generic",
-      "model": "erh:isaac-sim:world",
+      "model": "viam-labs:isaac-sim:world",
       "attributes": {
         "headless": true,
         "livestream": true,
@@ -40,7 +40,7 @@
       "name": "pick-arm",
       "namespace": "rdk",
       "type": "arm",
-      "model": "erh:isaac-sim:arm",
+      "model": "viam-labs:isaac-sim:arm",
       "frame": { "parent": "world" },
       "attributes": {
         "world": "sim-world",
@@ -51,7 +51,7 @@
       "name": "scene-cam",
       "namespace": "rdk",
       "type": "camera",
-      "model": "erh:isaac-sim:camera",
+      "model": "viam-labs:isaac-sim:camera",
       "frame": {
         "parent": "world",
         "translation": { "x": 2200, "y": 2200, "z": 2000 }
@@ -67,7 +67,7 @@
       "name": "wrist-cam",
       "namespace": "rdk",
       "type": "camera",
-      "model": "erh:isaac-sim:camera",
+      "model": "viam-labs:isaac-sim:camera",
       "attributes": {
         "world": "sim-world",
         "parent_prim": "/World/pick_arm/wrist_3_link",

@@ -1,7 +1,7 @@
-"""erh:isaac-sim:camera - a simulated RGB camera.
+"""viam-labs:isaac-sim:camera - a simulated RGB camera.
 
 Attributes:
-  world (string, required)        - name of the erh:isaac-sim:world component
+  world (string, required)        - name of the viam-labs:isaac-sim:world component
   prim_path (string)              - existing camera prim to attach to, or
                                     where to create one (default /World/<name>)
   width / height (int)            - resolution, default 640x480
