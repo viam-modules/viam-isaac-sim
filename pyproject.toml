@@ -3,10 +3,10 @@ name = "viam-isaac-sim"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = "~=3.11.0"
+requires-python = "~=3.12.0"
 dependencies = [
     # todo: experiment with smaller extras here
-    "isaacsim[all,extscache]==5.0.0",
+    "isaacsim[all,extscache]==6.0.1.0",
     "viam-sdk>=0.82.0",
 ]
 
@@ -15,6 +15,7 @@ override-dependencies = [
     # resolves a conflict between isaacsim and viam-sdk
     "typing-extensions>=4.15.0"
 ]
+index-strategy = "unsafe-best-match"
 
 [[tool.uv.index]]
 url = "https://pypi.nvidia.com/"
