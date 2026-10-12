@@ -16,4 +16,8 @@ if ! command -v uv >& /dev/null; then
 	curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
 
+if [ $VIAM_SIM_SANDBOX = 1 ]; then
+	export UV_PROJECT_ENVIRONMENT=/opt/isaac-sim-venv
+fi
+
 exec uv run src/main.py "$@"
