@@ -15,6 +15,8 @@ set -uo pipefail
 # run next to pyproject.toml
 cd "$(dirname "$0")"
 
+: "${VIAM_SIM_SANDBOX:=0}"
+
 log() { echo "viam-isaac-sim first_run: $*"; }
 
 if [ "$(uname -s)" != "Linux" ] || [ "$(uname -m)" != "x86_64" ]; then

@@ -4,6 +4,8 @@ set -euo pipefail
 # allow invocation from arbitrary working directory:
 cd "$(dirname "$0")"
 
+: "${VIAM_SIM_SANDBOX:=0}"
+
 # pip-installed isaac sim prompts for the EULA on first boot and refuses to
 # run as root without these
 export OMNI_KIT_ACCEPT_EULA=${OMNI_KIT_ACCEPT_EULA:-yes}
