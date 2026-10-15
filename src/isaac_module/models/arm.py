@@ -2,14 +2,21 @@
 
 Attributes:
   world (string, required)         - name of the viam-labs:isaac-sim:world component
-  asset (string)                   - known robot, e.g. "ur20", "ur10", "franka"
+  asset (string)                   - known robot, e.g. "lite6", "ur20", "ur10", "franka"
   usd_path (string)                - explicit USD to spawn instead of a known asset
   prim_path (string)               - where to place it (default /World/<name>), or
                                      an existing articulation in the stage
   position ([x,y,z] meters)        - spawn position
-  end_effector_prim (string)       - prim path whose world pose is reported by
-                                     GetEndPosition
+  end_effector_prim (string)       - prim path whose world pose GetEndPosition reports;
+                                     known assets provide a default when available
+  arm_model (string)               - optional episode manifest label for a custom USD
   move_timeout_sec (float)         - max time to wait for a move (default 30)
+  max_joint_deg_s (float)          - optional positive per-joint velocity limit passed
+                                     to the Isaac articulation
+  max_joint_deg_s2 (float)         - optional positive per-joint acceleration limit
+                                     reported for trajectory parameterization
+  is_moving_velocity_threshold_rad_s (float) - velocity above which IsMoving
+                                     reports true (default 0.01)
   robot_control_freq_hz (float)    - rate at which MoveThroughJointPositions
                                      streams waypoint targets (default 50Hz,
                                      range (0, 1000])
@@ -22,9 +29,8 @@ Attributes:
                                      range (0, 30])
   kinematics_url (string)          - where to fetch the kinematics file served
                                      by GetKinematics (.json = SVA, .urdf =
-                                     URDF; file:// URLs work). Known assets
-                                     with official viam kinematics
-                                     (ur3e/ur5e/ur20) fetch them automatically.
+                                     URDF; file:// URLs work). Known assets with
+                                     official Viam kinematics fetch them automatically.
 """
 
 import asyncio
@@ -32,8 +38,8 @@ import hashlib
 import math
 import os
 import tempfile
-import time
 import urllib.request
+from datetime import timedelta
 from typing import (
     Any,
     AsyncIterator,
@@ -44,6 +50,7 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    cast,
 )
 
 from typing_extensions import Self
@@ -56,7 +63,13 @@ from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes
 
 from .. import FAMILY, NAMESPACE
-from ..sim_manager import KNOWN_ASSETS, ArmHandle, SimManager
+from ..sim_manager import (
+    DEFAULT_ARM_IS_MOVING_VELOCITY_THRESHOLD_RAD_S,
+    KNOWN_ASSETS,
+    ArmHandle,
+    JointTrajectoryPoint,
+    SimManager,
+)
 from ..spatial import quat_to_ov
 from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
@@ -89,6 +102,58 @@ def _densify(
     return out
 
 
+def _max_joint_deg_s(
+    attrs: Mapping[str, Any], component_name: str
+) -> float | None:
+    raw = attrs.get("max_joint_deg_s")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f"{component_name}: max_joint_deg_s must be numeric")
+    limit = float(raw)
+    if not math.isfinite(limit) or limit <= 0.0:
+        raise ValueError(
+            f"{component_name}: max_joint_deg_s must be finite and positive"
+        )
+    return limit
+
+
+def _max_joint_deg_s2(
+    attrs: Mapping[str, Any], component_name: str
+) -> float | None:
+    raw = attrs.get("max_joint_deg_s2")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f"{component_name}: max_joint_deg_s2 must be numeric")
+    limit = float(raw)
+    if not math.isfinite(limit) or limit <= 0.0:
+        raise ValueError(
+            f"{component_name}: max_joint_deg_s2 must be finite and positive"
+        )
+    return limit
+
+
+def _is_moving_velocity_threshold(
+    attrs: Mapping[str, Any], component_name: str
+) -> float:
+    raw = attrs.get(
+        "is_moving_velocity_threshold_rad_s",
+        DEFAULT_ARM_IS_MOVING_VELOCITY_THRESHOLD_RAD_S,
+    )
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(
+            f"{component_name}: is_moving_velocity_threshold_rad_s must be numeric"
+        )
+    threshold = float(raw)
+    if not math.isfinite(threshold) or threshold < 0.0:
+        raise ValueError(
+            f"{component_name}: is_moving_velocity_threshold_rad_s must be finite "
+            "and non-negative"
+        )
+    return threshold
+
+
 class IsaacArm(Arm, EasyResource):
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "arm")
 
@@ -115,7 +180,12 @@ class IsaacArm(Arm, EasyResource):
     def validate_config(
         cls, config: ComponentConfig
     ) -> Tuple[Sequence[str], Sequence[str]]:
-        return validate_sim_component(config)
+        result = validate_sim_component(config)
+        attrs = get_attrs(config)
+        _is_moving_velocity_threshold(attrs, config.name)
+        _max_joint_deg_s(attrs, config.name)
+        _max_joint_deg_s2(attrs, config.name)
+        return result
 
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
@@ -138,12 +208,31 @@ class IsaacArm(Arm, EasyResource):
             )
         self._max_step_rad = math.radians(step_deg)
         self._attrs = attrs
+        attrs["is_moving_velocity_threshold_rad_s"] = (
+            _is_moving_velocity_threshold(attrs, config.name)
+        )
+        max_joint_deg_s = _max_joint_deg_s(attrs, config.name)
+        if max_joint_deg_s is not None:
+            attrs["max_joint_deg_s"] = max_joint_deg_s
+        max_joint_deg_s2 = _max_joint_deg_s2(attrs, config.name)
+        if max_joint_deg_s2 is not None:
+            attrs["max_joint_deg_s2"] = max_joint_deg_s2
         self._handle = SimManager.get().create_arm(self.name, attrs)
 
     def _h(self) -> ArmHandle:
         if self._handle is None:
             raise RuntimeError(f"arm {self.name} is not attached to the sim")
         return self._handle
+
+    def policy_metadata(self) -> Mapping[str, Any]:
+        """Return the simulator embodiment identity used by policy validation."""
+        model = str(self._attrs.get("asset", self._attrs.get("arm_model", "")))
+        meta = KNOWN_ASSETS.get(model, {})
+        return {
+            "simulation": True,
+            "arm_model": model,
+            "joint_names": list(meta.get("joint_names", ())),
+        }
 
     async def get_end_position(self, **kwargs) -> Pose:
         (x, y, z), quat = await asyncio.to_thread(self._h().get_end_pose)
@@ -165,6 +254,39 @@ class IsaacArm(Arm, EasyResource):
             "move_to_joint_positions"
         )
 
+    async def _wait_for_joint_targets(
+        self,
+        handle: ArmHandle,
+        targets: Sequence[float],
+        tolerance_rad: float,
+        timeout_s: float,
+    ) -> bool:
+        """Block until the sim thread reports the joints within tolerance.
+
+        The convergence check runs once per simulator frame on the sim thread,
+        so there is no RPC polling or wall-clock sleep between checks; the
+        wall-clock timeout only bounds a stalled move. Returns False on
+        timeout."""
+        future = await asyncio.to_thread(
+            handle.wait_for_joint_targets, targets, tolerance_rad
+        )
+        try:
+            await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout_s)
+        except TimeoutError:
+            future.cancel()
+            return False
+        return True
+
+    @staticmethod
+    def _stuck_joint_detail(
+        current: Sequence[float], targets: Sequence[float], tolerance_rad: float
+    ) -> str:
+        return ", ".join(
+            f"j{index}: at {math.degrees(actual):.1f} want {math.degrees(target):.1f}"
+            for index, (actual, target) in enumerate(zip(current, targets))
+            if abs(actual - target) > tolerance_rad
+        )
+
     async def move_to_joint_positions(
         self, positions: JointPositions, **kwargs
     ) -> None:
@@ -173,17 +295,17 @@ class IsaacArm(Arm, EasyResource):
         self._moving_count += 1
         try:
             await asyncio.to_thread(handle.set_joint_targets, targets)
-
-            deadline = time.monotonic() + self._move_timeout
-            while time.monotonic() < deadline:
-                current = await asyncio.to_thread(handle.get_joint_positions)
-                if len(current) >= len(targets) and all(
-                    abs(c - t) <= self._tolerance_rad for c, t in zip(current, targets)
-                ):
-                    return
-                await asyncio.sleep(0.05)
+            if await self._wait_for_joint_targets(
+                handle, targets, self._tolerance_rad, self._move_timeout
+            ):
+                return
+            current = await asyncio.to_thread(handle.get_joint_positions)
+            detail = self._stuck_joint_detail(
+                current, targets, self._tolerance_rad
+            )
             raise TimeoutError(
                 f"arm {self.name} did not reach target within {self._move_timeout}s"
+                f" (stuck joints: {detail or 'position unavailable'})"
             )
         finally:
             self._moving_count -= 1
@@ -215,21 +337,13 @@ class IsaacArm(Arm, EasyResource):
                     await asyncio.sleep(sleep_needed)
 
             final_targets = raw[-1]
-            deadline = loop.time() + self._move_timeout
-            current: List[float] = []
-            while loop.time() < deadline:
-                current = await asyncio.to_thread(handle.get_joint_positions)
-                if len(current) >= len(final_targets) and all(
-                    abs(c - t) <= self._tolerance_rad
-                    for c, t in zip(current, final_targets)
-                ):
-                    return
-                await asyncio.sleep(0.05)
-
-            detail = ", ".join(
-                f"j{j}: at {math.degrees(c):.1f} want {math.degrees(t):.1f}"
-                for j, (c, t) in enumerate(zip(current, final_targets))
-                if abs(c - t) > self._tolerance_rad
+            if await self._wait_for_joint_targets(
+                handle, final_targets, self._tolerance_rad, self._move_timeout
+            ):
+                return
+            current = await asyncio.to_thread(handle.get_joint_positions)
+            detail = self._stuck_joint_detail(
+                current, final_targets, self._tolerance_rad
             )
             raise TimeoutError(
                 f"arm {self.name} did not converge on final waypoint "
@@ -242,17 +356,67 @@ class IsaacArm(Arm, EasyResource):
     async def move_through_joint_positions_streamed(  # type: ignore
         self,
         batches: AsyncIterator[List[Arm.TrajectoryPoint]],
-        *,
-        extra: Optional[Dict[str, Any]] = None,
-        timeout: Optional[float] = None,
         **kwargs,
     ) -> AsyncIterator[Arm.TrajectoryUpdate]:
-        raise NotImplementedError(
-            f"arm {self.name} does not support move_through_joint_positions_streamed"
-        )
-        # unreachable, but makes this an async generator so the RPC handler's
-        # `async for` surfaces the NotImplementedError instead of a TypeError
-        yield Arm.TrajectoryUpdate()
+        last_time = timedelta(0)
+        first = True
+        handle = self._h()
+        async for batch in batches:
+            trajectory: list[JointTrajectoryPoint] = []
+            batch_start = last_time
+            for point in batch:
+                if first:
+                    if point.time != timedelta(0):
+                        raise ValueError("first trajectory point must have time zero")
+                    first = False
+                elif point.time <= last_time:
+                    raise ValueError("trajectory point times must strictly increase")
+                trajectory.append(
+                    JointTrajectoryPoint(
+                        time_s=(point.time - batch_start).total_seconds(),
+                        positions=tuple(
+                            math.radians(float(value)) for value in point.positions
+                        ),
+                    )
+                )
+                last_time = point.time
+
+            if trajectory:
+                expected = trajectory[-1].positions
+                start_task = asyncio.create_task(
+                    asyncio.to_thread(handle.start_trajectory, trajectory)
+                )
+                started = False
+                try:
+                    future = await asyncio.shield(start_task)
+                    started = True
+                    await asyncio.wrap_future(future)
+                finally:
+                    if not started:
+                        try:
+                            await start_task
+                        except BaseException:
+                            started = False
+                        else:
+                            started = True
+                    if started:
+                        await asyncio.to_thread(handle.stop_trajectory)
+                actual = await asyncio.to_thread(handle.get_joint_positions)
+                error_deg = max(
+                    (
+                        abs(math.degrees(want - got))
+                        for want, got in zip(expected, actual)
+                    ),
+                    default=0.0,
+                )
+                self.logger.info(
+                    "%s: trajectory complete expected=%s actual=%s max_error_deg=%.2f",
+                    self.name,
+                    [round(math.degrees(value), 2) for value in expected],
+                    [round(math.degrees(value), 2) for value in actual],
+                    error_deg,
+                )
+            yield Arm.TrajectoryUpdate()
 
     async def get_joint_positions(self, **kwargs) -> JointPositions:
         radians = await asyncio.to_thread(self._h().get_joint_positions)
@@ -310,48 +474,29 @@ class IsaacArm(Arm, EasyResource):
             pass  # caching is best-effort
         return fmt, data
 
-    async def get_kinematics(self, **kwargs) -> Tuple[KinematicsFileFormat.ValueType, bytes]:
+    async def get_kinematics(
+        self, **kwargs
+    ) -> Tuple[KinematicsFileFormat.ValueType, bytes]:
         if self._kinematics is None:
             self._kinematics = await asyncio.to_thread(self._load_kinematics)
         return self._kinematics
 
-    async def get_3d_models(
-        self,
-        *,
-        extra: Optional[Dict[str, Any]] = None,
-        timeout: Optional[float] = None,
-        **kwargs,
-    ) -> Mapping[str, Mesh]:
-        raise NotImplementedError(f"arm {self.name} does not support get_3d_models")
+    async def get_3d_models(self, **kwargs) -> Mapping[str, Mesh]:
+        return {}
 
     async def set_manual_mode(
-        self,
-        manual_mode: bool,
-        enabled_for: int = 0,
-        *,
-        extra: Optional[Dict[str, Any]] = None,
-        timeout: Optional[float] = None,
-        **kwargs,
+        self, manual_mode: bool, enabled_for: int = 0, **kwargs
     ) -> None:
-        raise NotImplementedError(f"arm {self.name} does not support manual mode")
+        raise NotImplementedError("manual mode is not supported by the simulated arm")
 
-    async def get_manual_mode(
-        self,
-        *,
-        extra: Optional[Dict[str, Any]] = None,
-        timeout: Optional[float] = None,
-        **kwargs,
-    ) -> bool:
-        raise NotImplementedError(f"arm {self.name} does not support manual mode")
+    async def get_manual_mode(self, **kwargs) -> bool:
+        return False
 
-    async def get_properties(
-        self,
-        *,
-        extra: Optional[Dict[str, Any]] = None,
-        timeout: Optional[float] = None,
-        **kwargs,
-    ) -> Arm.Properties:
-        raise NotImplementedError(f"arm {self.name} does not support get_properties")
+    async def get_properties(self, **kwargs) -> Arm.Properties:
+        return Arm.Properties(
+            support_manual_mode=False,
+            support_cartesian_commands=False,
+        )
 
     async def get_geometries(self, **kwargs) -> List[Geometry]:
         return []
@@ -363,6 +508,23 @@ class IsaacArm(Arm, EasyResource):
         timeout: Optional[float] = None,
         **kwargs,
     ) -> Mapping[str, ValueTypes]:
-        if command.get("command") == "get_joint_positions_radians":
-            return {"values": await asyncio.to_thread(self._h().get_joint_positions)}
+        cmd = command.get("command")
+        if cmd == "policy_metadata":
+            return self.policy_metadata()
+        if cmd == "get_joint_positions_radians":
+            return cast(
+                Mapping[str, ValueTypes],
+                {"values": await asyncio.to_thread(self._h().get_joint_positions)},
+            )
+        if cmd == "dynamics_metadata":
+            return await asyncio.to_thread(self._h().dynamics_metadata)
+        if cmd == "set_joint_targets_radians":
+            raw = command.get("values")
+            if not isinstance(raw, (list, tuple)) or len(raw) != 6:
+                raise ValueError("set_joint_targets_radians requires six values")
+            targets = [float(value) for value in cast(Any, raw)]
+            if not all(math.isfinite(value) for value in targets):
+                raise ValueError("set_joint_targets_radians values must be finite")
+            await asyncio.to_thread(self._h().set_joint_targets, targets)
+            return {"accepted": True}
         raise ValueError(f"unknown command: {command}")

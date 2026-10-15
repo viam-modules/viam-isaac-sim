@@ -3,18 +3,67 @@ name = "viam-isaac-sim"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = "~=3.11.0"
+authors = [
+    # todo: generic email please
+    { name = "abe-winter", email = "abe-winter@users.noreply.github.com" }
+]
+requires-python = ">=3.11"
 dependencies = [
-    # todo: experiment with smaller extras here
-    "isaacsim[all,extscache]==5.0.0",
+    "av>=13.0.0",
+    "numpy>=1.26.0",
+    "pillow>=11.2.1",
+    # less than 26 for numpy compat
+    # pyarrow conventiently enforces this at runtime not in metadata
+    "pyarrow>=17.0.0,<26",
+    "toppra>=0.6.10",
+    "tqdm>=4.70.1",
     "viam-sdk>=0.84.0",
 ]
 
-[tool.uv]
-override-dependencies = [
-    # resolves a conflict between isaacsim and viam-sdk
-    "typing-extensions>=4.15.0"
+[project.optional-dependencies]
+full = [
+    "isaacsim[all,extscache]==5.0.0",
 ]
 
+[project.scripts]
+viam-isaac-sim = "viam_isaac_sim:main"
+
+[tool.uv]
+# hack to make isaacsim compatible with viam-sdk; latter has newer
+# likely remove if we go to isaac 6
+override-dependencies = ["typing-extensions>=4.15.0"]
+
+# I think explicit index and uv.sources pins are not necessary now that .python-version is pinning
+# test removing them
 [[tool.uv.index]]
-url = "https://pypi.nvidia.com/"
+name = "nvidia"
+url = "https://pypi.nvidia.com"
+explicit = true
+
+[tool.uv.sources]
+isaacsim-code-editor = { index = "nvidia" }
+isaacsim-kernel = { index = "nvidia" }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.0",
+]
+
+[tool.ruff.lint]
+ignore = [
+    "I001",
+    "UP006",
+    "UP045",
+    "C408",
+    "RUF059",
+    "BLE001",
+    "UP035",
+    "TRY004",
+    "S110",
+    "UP037",
+    "SIM102",
+    "F401", # remove this one
+    "UP017",
+    "B008",
+    "UP007",
+]

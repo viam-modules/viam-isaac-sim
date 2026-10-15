@@ -15,20 +15,23 @@
       "model": "viam-labs:isaac-sim:world",
       "attributes": {
         "headless": true,
-        "livestream": true,
+        "livestream": false,
         "props": [
           {
-            "name": "pick_cube",
+            "name": "pick_block",
             "type": "cube",
-            "position": [0.7, 0.25, 0.03],
-            "size": 0.06,
-            "color": [0.9, 0.1, 0.1]
+            "position": [2.5, 0, 0.02],
+            "size": 0.0313,
+            "scale": [1, 1, 1],
+            "color": [1, 0, 0],
+            "static_friction": 2.0,
+            "dynamic_friction": 2.0
           },
           {
             "name": "place_pad",
             "type": "cube",
             "fixed": true,
-            "position": [0.7, -0.35, 0.005],
+            "position": [0.32, -0.22, 0.005],
             "size": 0.2,
             "scale": [1, 1, 0.05],
             "color": [0.1, 0.3, 0.9]
@@ -44,7 +47,28 @@
       "frame": { "parent": "world" },
       "attributes": {
         "world": "sim-world",
-        "asset": "ur20"
+        "asset": "lite6",
+        "max_joint_deg_s": 30,
+        "max_joint_deg_s2": 60,
+        "end_effector_prim": "/World/pick_arm/gripper/uflite_gripper_link"
+      }
+    },
+    {
+      "name": "pick-gripper",
+      "namespace": "rdk",
+      "type": "gripper",
+      "model": "viam-labs:isaac-sim:gripper",
+      "frame": {
+        "parent": "pick-arm",
+        "translation": { "x": 0, "y": 0, "z": 83.6 }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "asset": "lite6_gripper",
+        "arm": "pick-arm",
+        "jaw_layout": "wide",
+        "sensorless": true,
+        "grab_timeout_sec": 20
       }
     },
     {
@@ -58,7 +82,7 @@
       },
       "attributes": {
         "world": "sim-world",
-        "target": [0.6, 0, 0.2],
+        "target": [0.3, 0, 0.15],
         "width": 1280,
         "height": 720
       }
@@ -70,8 +94,10 @@
       "model": "viam-labs:isaac-sim:camera",
       "attributes": {
         "world": "sim-world",
-        "parent_prim": "/World/pick_arm/wrist_3_link",
-        "local_position": [0, 0, 0.06],
+        "parent_prim": "/World/pick_arm/gripper/uflite_gripper_link",
+        "local_position": [0.04, 0, 0.04],
+        "local_orientation_rpy_deg": [180, -30, 0],
+        "near_clip_m": 0.01,
         "width": 640,
         "height": 480
       }

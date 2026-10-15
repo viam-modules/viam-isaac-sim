@@ -20,6 +20,11 @@
       "short_description": "A simulated RGB camera in the Isaac Sim stage"
     },
     {
+      "model": "viam-labs:isaac-sim:gripper",
+      "api": "rdk:component:gripper",
+      "short_description": "A simulated UR-mounted Robotiq 2F-85 gripper"
+    },
+    {
       "model": "viam-labs:isaac-sim:base",
       "api": "rdk:component:base",
       "short_description": "A simulated differential-drive base"
