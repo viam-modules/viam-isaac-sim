@@ -7,7 +7,7 @@ requires-python = "~=3.11.0"
 dependencies = [
     # todo: experiment with smaller extras here
     "isaacsim[all,extscache]==5.0.0",
-    "viam-sdk>=0.82.0",
+    "viam-sdk>=0.84.0",
 ]
 
 [tool.uv]
