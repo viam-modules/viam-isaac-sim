@@ -16,7 +16,7 @@ import threading
 from viam.logging import getLogger
 from viam.module.module import Module
 
-import isaac_module.models  # noqa: F401 - registers all models
+import isaac_module.models
 from isaac_module import sdk_patches
 from isaac_module.sim_manager import SimManager
 

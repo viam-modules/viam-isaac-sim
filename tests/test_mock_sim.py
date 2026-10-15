@@ -5,6 +5,7 @@ the viam component models against it."""
 import asyncio
 import math
 import threading
+from types import SimpleNamespace
 
 import pytest
 from viam.proto.app.robot import ComponentConfig
@@ -15,7 +16,13 @@ from isaac_module.models.arm import IsaacArm, _densify
 from isaac_module.models.base import IsaacBase
 from isaac_module.models.camera import IsaacCamera
 from isaac_module.models.world import IsaacWorld
-from isaac_module.sim_manager import SimManager
+from isaac_module.sim_manager import (
+    SimConfig,
+    SimManager,
+    _visual_material_properties,
+    default_rendering_dt,
+    validate_rendering_dt,
+)
 
 
 def _config(name: str, attrs: dict) -> ComponentConfig:
@@ -24,23 +31,183 @@ def _config(name: str, attrs: dict) -> ComponentConfig:
 
 @pytest.fixture(scope="module")
 def sim():
-    manager = SimManager.get()
+    previous = SimManager._instance
+    manager = SimManager()
+    SimManager._instance = manager
     t = threading.Thread(target=manager.main_loop, daemon=True)
     t.start()
     yield manager
     manager.request_stop()
     t.join(timeout=5)
+    SimManager._instance = previous
 
 
 @pytest.fixture(scope="module")
 def world(sim):
-    return IsaacWorld.new(_config("sim-world", {"mock": True}), {})
+    return IsaacWorld.new(
+        _config(
+            "sim-world",
+            {
+                "mock": True,
+                "props": [
+                    {
+                        "name": "pick_block",
+                        "type": "cube",
+                        "position": [2.5, 0.0, 0.0125],
+                        "size": 0.075,
+                        "scale": [1.0, 0.2, 1.0 / 3.0],
+                    }
+                ],
+            },
+        ),
+        {},
+    )
 
 
 def test_world_boots_and_status(world):
     status = asyncio.run(world.do_command({"command": "status"}))
     assert status["booted"] is True
     assert status["mock"] is True
+
+
+def test_mock_sim_clock_advances(sim):
+    import time
+
+    before = sim.sim_time_s()
+    time.sleep(0.05)
+    assert sim.sim_time_s() > before
+
+
+@pytest.mark.parametrize(
+    ("physics_dt", "capture_rate_hz", "expected"),
+    (
+        (1 / 60, 20.0, 1 / 20),
+        (1 / 60, 15.0, 1 / 15),
+        (1 / 60, 60.0, 1 / 60),
+        (1 / 100, 20.0, 1 / 20),
+        # 7 Hz is not a whole number of 1/60 steps: render every physics step
+        (1 / 60, 7.0, 1 / 60),
+        # capture faster than physics: render every physics step
+        (1 / 20, 60.0, 1 / 20),
+    ),
+)
+def test_default_rendering_dt_renders_once_per_capture_sample(
+    physics_dt, capture_rate_hz, expected
+):
+    assert default_rendering_dt(physics_dt, capture_rate_hz) == pytest.approx(
+        expected
+    )
+
+
+def test_sim_config_resolves_rendering_dt():
+    assert SimConfig(capture_rate_hz=20.0).resolved_rendering_dt() == pytest.approx(
+        1 / 20
+    )
+    assert SimConfig(rendering_dt=1 / 60).resolved_rendering_dt() == pytest.approx(
+        1 / 60
+    )
+    assert SimConfig(
+        physics_dt=1 / 120, rendering_dt=1 / 30
+    ).resolved_rendering_dt() == pytest.approx(1 / 30)
+    with pytest.raises(ValueError, match="integer multiple"):
+        SimConfig(physics_dt=1 / 60, rendering_dt=1 / 40).resolved_rendering_dt()
+    with pytest.raises(ValueError, match="integer multiple"):
+        SimConfig(physics_dt=1 / 60, rendering_dt=1 / 120).resolved_rendering_dt()
+
+
+def test_world_validate_config_rejects_misaligned_rendering_dt():
+    with pytest.raises(ValueError, match="integer multiple"):
+        IsaacWorld.validate_config(
+            _config("w", {"physics_dt": 1 / 60, "rendering_dt": 1 / 40})
+        )
+    IsaacWorld.validate_config(_config("w", {"rendering_dt": 1 / 20}))
+    validate_rendering_dt(1 / 60, 1 / 20)
+
+
+def test_visual_material_presets_are_validated_before_boot():
+    assert _visual_material_properties("wood")["metallic"] == 0.0
+    assert _visual_material_properties("brushed_metal")["metallic"] == 1.0
+    manager = SimManager()
+    manager._register_props([{"name": "table", "visual_material": "wood"}])
+    assert manager._prop_specs["table"]["visual_material"] == "wood"
+    with pytest.raises(ValueError, match="visual_material"):
+        manager._register_props([{"name": "table", "visual_material": "marble"}])
+
+def test_spawned_cubes_override_isaac_contact_offsets():
+    offsets = []
+
+    class FakeCuboid:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def set_rest_offset(self, value):
+            offsets.append(("rest", value))
+
+        def set_contact_offset(self, value):
+            offsets.append(("contact", value))
+
+    manager = object.__new__(SimManager)
+    manager._isaac = SimpleNamespace(
+        PhysicsMaterial=lambda **kwargs: object(),
+        DynamicCuboid=FakeCuboid,
+        FixedCuboid=FakeCuboid,
+    )
+    added = []
+    manager.world = SimpleNamespace(scene=SimpleNamespace(add=added.append))
+
+    manager._spawn_prop({"name": "block", "type": "cube"})
+
+    assert offsets == [("rest", 0.0), ("contact", 0.001)]
+    assert len(added) == 1
+
+
+def test_world_park_props_restores_configured_pose(world):
+    asyncio.run(
+        world.do_command(
+            {
+                "command": "set_prop_pose",
+                "prop": "pick_block",
+                "position": [0.5, 0.1, 0.025],
+                "orientation_wxyz": [1.0, 0.0, 0.0, 0.0],
+            }
+        )
+    )
+
+    parked = asyncio.run(
+        world.do_command({"command": "park_props", "props": ["pick_block"]})
+    )
+
+    assert parked["poses"]["pick_block"]["position"] == [2.5, 0.0, 0.0125]
+
+
+def test_world_set_prop_pose_accepts_and_returns_posed(world):
+    """Test that set_prop_pose command applies and returns the given pose."""
+    # Set prop to a non-default position and quaternion (45 degree rotation)
+    position = [0.5, 0.1, 0.025]
+    orientation_wxyz = [math.cos(math.radians(45) / 2), 0, 0, math.sin(math.radians(45) / 2)]
+
+    result = asyncio.run(
+        world.do_command(
+            {
+                "command": "set_prop_pose",
+                "prop": "pick_block",
+                "position": position,
+                "orientation_wxyz": orientation_wxyz,
+            }
+        )
+    )
+
+    # Assert returned pose matches what was set
+    assert result["position"] == pytest.approx(position)
+    assert result["orientation_wxyz"] == pytest.approx(orientation_wxyz)
+
+    # Query the pose and verify it matches
+    queried = asyncio.run(
+        world.do_command({"command": "get_prop_pose", "prop": "pick_block"})
+    )
+    assert queried["pose"]["position"] == pytest.approx(position)
+    assert queried["pose"]["orientation_wxyz"] == pytest.approx(orientation_wxyz)
+
 
 
 def test_validate_requires_world():
@@ -73,9 +240,12 @@ def test_arm_moves(world):
 
         target = JointPositions(values=[10, -20, 30, 0, 5, -5])
         await arm.move_to_joint_positions(target)
-        assert not await arm.is_moving()
         end = await arm.get_joint_positions()
         assert end.values == pytest.approx([10, -20, 30, 0, 5, -5], abs=0.5)
+        # the move returns inside the 0.5 degree tolerance; the mock covers that
+        # last window at 1 rad/s in under 10 ms and then snaps to its target
+        await asyncio.sleep(0.05)
+        assert not await arm.is_moving()
 
         pose = await arm.get_end_position()
         assert pose.x == pytest.approx(300.0)
@@ -89,6 +259,30 @@ def test_arm_moves(world):
         await arm.move_through_joint_positions(waypoints)
         end = await arm.get_joint_positions()
         assert end.values == pytest.approx([0] * 6, abs=0.5)
+
+    asyncio.run(scenario())
+
+
+def test_arm_set_joint_targets_radians_is_immediate_and_validated(world):
+    arm = IsaacArm.new(
+        _config("stream-arm", {"world": "sim-world", "asset": "ur20", "mock_dof": 6}),
+        {},
+    )
+
+    async def scenario():
+        target = [0.1, -0.2, 0.3, -0.1, 0.2, -0.3]
+        result = await arm.do_command(
+            {"command": "set_joint_targets_radians", "values": target}
+        )
+        assert result == {"accepted": True}
+        # Component is_moving tracks MoveTo RPCs; the raw handle tracks drive motion.
+        assert not await arm.is_moving()
+        assert arm._h().is_moving()
+        await arm.stop()
+        with pytest.raises(ValueError, match="six values"):
+            await arm.do_command(
+                {"command": "set_joint_targets_radians", "values": [0.0]}
+            )
 
     asyncio.run(scenario())
 
@@ -186,8 +380,9 @@ def test_camera_returns_image(world):
         assert img.mime_type == "image/jpeg"
         assert len(img.data) > 100
 
-        from PIL import Image
         from io import BytesIO
+
+        from PIL import Image
 
         decoded = Image.open(BytesIO(img.data))
         assert decoded.size == (320, 240)
@@ -221,3 +416,35 @@ def test_base_drives(world):
         assert props.wheel_circumference_meters == pytest.approx(2 * math.pi * 0.05)
 
     asyncio.run(scenario())
+
+
+def test_capture_after_render_samples_once_per_capture_period():
+    from types import SimpleNamespace
+
+    from isaac_module.sim_manager import SimConfig, SimManager
+
+    manager = SimManager()
+    manager.cfg = SimConfig(capture_rate_hz=15.0, capture_after_render=True)
+    manager._episode_writer = SimpleNamespace(failed=False)
+    sampled = []
+    manager._capture_sample = lambda sim_time_s: (
+        sampled.append(round(sim_time_s, 6)),
+        setattr(manager, "_capture_frame_index", manager._capture_frame_index + 1),
+    )
+    manager.world = SimpleNamespace(current_time=10.0)
+    manager._capture_started_sim_s = 10.0
+    manager._capture_last_sim_s = 10.0
+
+    # Rendering once per capture period samples after every update.
+    for _ in range(3):
+        manager.world.current_time += 1.0 / 15.0
+        manager._capture_after_render()
+    assert sampled == [round(10.0 + k / 15.0, 6) for k in range(3)]
+
+    # Rendering every physics step samples after every fourth update, and a
+    # paused sim (no sim time passing) samples nothing.
+    for _ in range(8):
+        manager.world.current_time += 1.0 / 60.0
+        manager._capture_after_render()
+    manager._capture_after_render()
+    assert len(sampled) == 5

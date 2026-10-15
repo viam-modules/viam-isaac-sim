@@ -47,7 +47,9 @@ def frame_pose(config: ComponentConfig) -> Tuple[Optional[Vec3], Optional[Quat]]
     return position, quat
 
 
-def apply_frame_to_attrs(config: ComponentConfig, attrs: Dict[str, Any]) -> Dict[str, Any]:
+def apply_frame_to_attrs(
+    config: ComponentConfig, attrs: Dict[str, Any]
+) -> Dict[str, Any]:
     """Fold the frame config into the spawn attrs (frame wins over the
     legacy position/orientation attributes)."""
     position, quat = frame_pose(config)
@@ -56,6 +58,26 @@ def apply_frame_to_attrs(config: ComponentConfig, attrs: Dict[str, Any]) -> Dict
     if quat is not None:
         attrs["orientation_wxyz"] = list(quat)
     return attrs
+
+
+def apply_camera_frame_to_attrs(
+    config: ComponentConfig, attrs: Dict[str, Any]
+) -> Dict[str, Any]:
+    if (
+        attrs.get("parent_prim")
+        and config.HasField("frame")
+        and config.frame.parent != "world"
+    ):
+        position, quat = frame_pose(config)
+        attrs.pop("local_position", None)
+        attrs.pop("local_orientation_rpy_deg", None)
+        if position is not None:
+            attrs["local_position"] = list(position)
+        if quat is not None:
+            attrs["local_orientation_wxyz"] = list(quat)
+        attrs["local_camera_axes"] = "ros"
+        return attrs
+    return apply_frame_to_attrs(config, attrs)
 
 
 def validate_sim_component(

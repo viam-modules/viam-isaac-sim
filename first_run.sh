@@ -15,8 +15,6 @@ set -uo pipefail
 # run next to pyproject.toml
 cd "$(dirname "$0")"
 
-: "${VIAM_SIM_SANDBOX:=0}"
-
 log() { echo "viam-isaac-sim first_run: $*"; }
 
 if [ "$(uname -s)" != "Linux" ] || [ "$(uname -m)" != "x86_64" ]; then
@@ -88,17 +86,9 @@ if [ "$(id -u)" = "0" ] || [ -n "$SUDO" ]; then
     fi
 fi
 
-export PATH="$PATH:$HOME/.local/bin"
-if ! command -v uv >& /dev/null; then
-	# todo: better way to manage min version of uv here
-	curl -LsSf https://astral.sh/uv/install.sh | sh
-fi
-
-if [ $VIAM_SIM_SANDBOX = 1 ]; then
-	export UV_PROJECT_ENVIRONMENT=/opt/isaac-sim-venv
-fi
+. env.sh
 
 # uv sync in first_run.sh, not run.sh, because it has a longer default timeout
 export UV_NO_CACHE=false
 uv cache dir
-uv sync
+uv sync --extra full
