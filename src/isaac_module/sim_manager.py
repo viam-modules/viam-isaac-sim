@@ -2913,44 +2913,6 @@ class IsaacArmHandle(ArmHandle):
                 self._target,
             )
 
-            trace_name = f"arm_stop_trace_{id(self)}"
-            sample_index = 0
-
-            def _trace_stop(step_size: float) -> None:
-                nonlocal sample_index
-                try:
-                    positions = tuple(
-                        float(value)
-                        for value in self._art.get_joint_positions(
-                            joint_indices=self._joint_indices
-                        )
-                    )
-                    velocities_raw = self._art.get_joint_velocities(
-                        joint_indices=self._joint_indices
-                    )
-                    velocities = (
-                        None
-                        if velocities_raw is None
-                        else tuple(float(value) for value in velocities_raw)
-                    )
-                    LOGGER.info(
-                        "arm %s stop trace sample=%s step_size_s=%s "
-                        "positions_rad=%s velocities_rad_s=%s hold_target_rad=%s",
-                        self._prim_path,
-                        sample_index,
-                        step_size,
-                        positions,
-                        velocities,
-                        self._target,
-                    )
-                    sample_index += 1
-                    if sample_index >= 20:
-                        self._sim._step_callbacks.pop(trace_name, None)
-                except BaseException:
-                    self._sim._step_callbacks.pop(trace_name, None)
-                    LOGGER.exception("arm %s stop trace failed", self._prim_path)
-
-            self._sim._step_callbacks[trace_name] = _trace_stop
             # The measured pose includes any active nudge; keep the target clean.
             nudge = self._nudge or [0.0] * len(current)
             self._target = [value - offset for value, offset in zip(current, nudge)]
