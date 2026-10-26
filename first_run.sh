@@ -34,7 +34,7 @@ if [ "$(id -u)" != "0" ]; then
     fi
 fi
 
-APT_DEPS="software-properties-common curl ca-certificates libvulkan1 vulkan-tools libglu1-mesa libegl1 libgomp1 libxt6 libxrandr2 libgl1 libglx0 libopengl0 libglvnd0"
+APT_DEPS="software-properties-common curl ca-certificates libvulkan1 vulkan-tools libglu1-mesa libegl1 libgomp1 libxt6t64 libxrandr2 libgl1 libglx0 libopengl0 libglvnd0"
 
 # ---------------------------------------------------------------------------
 # apt: system libs, python, gpu driver
