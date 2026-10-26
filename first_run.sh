@@ -34,7 +34,13 @@ if [ "$(id -u)" != "0" ]; then
     fi
 fi
 
-APT_DEPS="software-properties-common curl ca-certificates libvulkan1 vulkan-tools libglu1-mesa libegl1 libgomp1 libxt6t64 libxrandr2 libgl1 libglx0 libopengl0 libglvnd0"
+xt6_dep=libxt6t64
+if [ "$(. /etc/os-release && echo $VERSION_ID)" = "22.04" ]; then
+	# legacy name for this dep for ubuntu 22 compatibility
+	xt6_dep=libxt6
+fi
+
+APT_DEPS="software-properties-common curl ca-certificates libvulkan1 vulkan-tools libglu1-mesa libegl1 libgomp1 $xt6_dep libxrandr2 libgl1 libglx0 libopengl0 libglvnd0"
 
 # ---------------------------------------------------------------------------
 # apt: system libs, python, gpu driver
