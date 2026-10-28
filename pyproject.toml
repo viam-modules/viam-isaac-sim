@@ -17,7 +17,7 @@ dependencies = [
     "pyarrow>=17.0.0,<26",
     "toppra>=0.6.10",
     "tqdm>=4.70.1",
-    "viam-sdk>=0.85.0",
+    "viam-sdk>=0.85.1",
 ]
 
 [project.optional-dependencies]
