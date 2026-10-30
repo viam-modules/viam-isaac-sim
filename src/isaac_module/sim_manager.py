@@ -1026,9 +1026,16 @@ class SimManager:
         return self.run(_read, timeout=120.0)
 
     def mark_episode_stage(self, task: str) -> dict[str, Any]:
-        """Start an annotated stage at the next native capture frame."""
+        """Start an annotated stage at the next native capture frame.
+
+        Only call this while the simulation is playing.
+        """
 
         def _mark() -> dict[str, Any]:
+            if not self.mock and not self.world.is_playing():
+                raise RuntimeError(
+                    "mark_episode_stage requires the simulation to be playing"
+                )
             if self._episode_id is None:
                 raise RuntimeError("no episode is being captured")
             writer = self._episode_writer
@@ -1549,6 +1556,13 @@ class SimManager:
         if not self.mock:
             self.run(lambda: self.world.pause())
 
+    def is_playing(self) -> bool:
+        """Return whether the simulation timeline is playing."""
+        if self.mock:
+            return True
+        self._require_booted()
+        return self.run(lambda: bool(self.world.is_playing()))
+
     def reset(self) -> None:
         self._require_booted()
         if not self.mock:
@@ -1568,7 +1582,7 @@ class SimManager:
             "error": str(self._boot_error) if self._boot_error else "",
         }
         if self._booted.is_set() and not self.mock:
-            out["playing"] = self.run(lambda: bool(self.world.is_playing()))
+            out["playing"] = self.is_playing()
             out["sim_time"] = self.sim_time_s()
         return out
 

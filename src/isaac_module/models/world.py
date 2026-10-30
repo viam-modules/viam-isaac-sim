@@ -243,6 +243,10 @@ class IsaacWorld(Generic, EasyResource):
             task = str(command.get("task", "")).strip()
             if not task:
                 raise ValueError("mark_episode_stage requires task")
+            if not await asyncio.to_thread(sim.is_playing):
+                raise RuntimeError(
+                    "mark_episode_stage requires the simulation to be playing"
+                )
             await self._wait_for_trainable_stage(sim)
             return await asyncio.to_thread(sim.mark_episode_stage, task)
         if cmd == "stop_episode":

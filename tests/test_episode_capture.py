@@ -58,13 +58,17 @@ def _config(name, attrs):
 
 
 class FakePhysicsWorld:
-    def __init__(self, *, render_delivery=0, render_png_frames=None):
+    def __init__(self, *, render_delivery=0, render_png_frames=None, playing=True):
         self.callbacks = {}
         self.current_time = 0.0
         self.events = []
         self._render_delivery = render_delivery
         self._render_png_frames = render_png_frames
         self._render_writer = None
+        self._playing = playing
+
+    def is_playing(self):
+        return self._playing
 
     def add_physics_callback(self, name, callback):
         self.callbacks[name] = callback
@@ -304,6 +308,47 @@ def test_mock_episode_has_aligned_samples_and_video(tmp_path):
             assert sum(1 for _ in container.decode(video=0)) == len(samples)
         assert stage_starts <= _idr_frame_indices(episode / name)
 
+
+
+def test_mark_episode_stage_rejects_paused_simulation():
+    class UnexpectedWriter:
+        def mark_stage(self, *unused_args):
+            raise AssertionError("paused simulation must not mark a stage")
+
+    manager = SimManager()
+    manager._sim_thread_id = threading.get_ident()
+    manager.world = FakePhysicsWorld(playing=False)
+    manager._episode_id = "000042"
+    manager._episode_writer = UnexpectedWriter()
+
+    with pytest.raises(RuntimeError, match="requires the simulation to be playing"):
+        manager.mark_episode_stage("Lower the gripper")
+
+
+def test_mark_episode_stage_command_rejects_pause_before_waiting():
+    class PausedSim:
+        def is_playing(self):
+            return False
+
+        def active_episode_stage_frame_count(self):
+            raise AssertionError("paused simulation must not wait for capture frames")
+
+    previous = SimManager._instance
+    SimManager._instance = PausedSim()
+    try:
+        with pytest.raises(
+            RuntimeError, match="requires the simulation to be playing"
+        ):
+            asyncio.run(
+                IsaacWorld("sim-world").do_command(
+                    {
+                        "command": "mark_episode_stage",
+                        "task": "Lower the gripper",
+                    }
+                )
+            )
+    finally:
+        SimManager._instance = previous
 
 
 def test_cosmos_capture_rejects_mock_mode(tmp_path):
