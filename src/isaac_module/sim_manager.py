@@ -27,6 +27,15 @@ from typing import Any, Optional
 
 from viam.logging import getLogger
 
+from .bodies import (
+    BodyHandle,
+    BuoyancySpec,
+    MockBodyHandle,
+    MotorHandle,
+    MovementSensorHandle,
+    MovementSensorSpec,
+)
+
 LOGGER = getLogger("viam-isaac-sim")
 
 # Assets shipped on the Isaac Sim nucleus/content server, addressable by a
@@ -231,7 +240,9 @@ class SimConfig:
     #   {"type": "cube"|"usd", "name": ..., "position": [x,y,z] (m),
     #    "size": edge_m, "scale": [sx,sy,sz], "color": [r,g,b] 0-1,
     #    "fixed": bool, "usd_path": ..., "static_friction": float,
-    #    "dynamic_friction": float, "visual_material": "wood"|"brushed_metal"}
+    #    "dynamic_friction": float, "visual_material": "wood"|"brushed_metal",
+    #    "mass": kg, "buoyancy": true | {...} (floats on the world's water;
+    #    see bodies.BuoyancySpec)}
     props: list[dict[str, Any]] = field(default_factory=list)
     # kit console verbosity (verbose/info/warning/error). Kit prints thousands
     # of lines at info, and viam-server records the module's stderr as
@@ -240,6 +251,16 @@ class SimConfig:
     # add_default_ground_plane loads the Grid env USD, which bundles floor
     # collider AND the lighting rig; when false, we add fallback lights
     isaac_default_environment: bool = True
+    # a flat water surface for floating props:
+    #   {"level_m": 0.0, "size_m": 400, "depth_m": 10, "color": [r,g,b]}
+    # Replaces the default ground plane with a visual surface at level_m
+    # (no collision) and a seabed collider depth_m below it.
+    water: dict[str, Any] | None = None
+
+    def water_level_m(self) -> float:
+        if self.water is None:
+            return 0.0
+        return float(self.water.get("level_m", 0.0))
 
     def resolved_rendering_dt(self) -> float:
         """The render period Isaac's World is built with."""
@@ -457,6 +478,9 @@ class SimManager:
         self._handles: dict[str, tuple[dict[str, Any], Any]] = {}
         self._prop_specs: dict[str, dict[str, Any]] = {}
         self._mock_prop_poses: dict[str, dict[str, Any]] = {}
+        # rigid bodies that motors push and movement sensors read, keyed by
+        # prop name and by prim path
+        self._bodies: dict[str, BodyHandle] = {}
         self._episode_writer = None
         self._episode_id: str | None = None
         self._cosmos_writer = None
@@ -511,6 +535,9 @@ class SimManager:
             prop["name"] = name
             if prop.get("visual_material") is not None:
                 _visual_material_properties(prop["visual_material"])
+            if prop.get("mass") is not None and float(prop["mass"]) <= 0.0:
+                raise ValueError(f"prop {name}: mass must be positive")
+            BuoyancySpec.from_prop(prop, self.cfg.water_level_m() if self.cfg else 0.0)
             position = _vector3(prop.get("position", (0.0, 0.0, 0.0)), "position")
             orientation = _quaternion(
                 prop.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0)),
@@ -1301,6 +1328,8 @@ class SimManager:
         if cfg.mock:
             LOGGER.info("booting in MOCK mode - no isaac sim")
             self.mock = True
+            for prop in self._prop_specs.values():
+                self._mock_body_for_prop(prop)
             return
 
         LOGGER.info("booting isaac sim (headless=%s)...", cfg.headless)
@@ -1416,7 +1445,11 @@ class SimManager:
             stage = omni.usd.get_context().get_stage()
             dome_light = UsdLux.DomeLight.Define(stage, Sdf.Path("/World/DomeLight"))
             dome_light.CreateIntensityAttr(1000.0)
-        if not cfg.usd_stage:
+        if cfg.water is not None:
+            # the default ground plane sits at z=0, right where a boat floats
+            self._add_fallback_lighting()
+            self._spawn_water(cfg.water)
+        elif not cfg.usd_stage:
             if cfg.isaac_default_environment:
                 self.world.scene.add_default_ground_plane()
             else:
@@ -1425,6 +1458,43 @@ class SimManager:
             self._spawn_prop(prop)
         self.world.reset()
         LOGGER.info("isaac sim world ready")
+
+    def _spawn_water(self, water: dict[str, Any]) -> None:
+        """A visual-only water surface plus a seabed collider under it."""
+        import numpy as np
+        from pxr import Gf, Sdf, UsdGeom
+
+        level = float(water.get("level_m", 0.0))
+        size = float(water.get("size_m", 400.0))
+        depth = float(water.get("depth_m", 10.0))
+        color = [float(v) for v in water.get("color", (0.03, 0.22, 0.38))]
+        if size <= 0.0 or depth <= 0.0:
+            raise ValueError("water size_m and depth_m must be positive")
+
+        stage = self.world.stage
+        UsdGeom.Xform.Define(stage, Sdf.Path("/World/Water"))
+        surface = UsdGeom.Cube.Define(stage, Sdf.Path("/World/Water/Surface"))
+        surface.GetSizeAttr().Set(1.0)
+        xform = UsdGeom.Xformable(surface.GetPrim())
+        xform.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, level - 0.01))
+        xform.AddScaleOp().Set(Gf.Vec3f(size, size, 0.02))
+        self._bind_preview_surface(
+            "/World/Water/Surface",
+            diffuse_color=tuple(color),
+            roughness=0.15,
+            metallic=0.0,
+            opacity=0.8,
+        )
+        seabed = self._isaac.FixedCuboid(
+            prim_path="/World/Water/Seabed",
+            name="seabed",
+            position=np.array([0.0, 0.0, level - depth - 0.5]),
+            size=1.0,
+            scale=np.array([size, size, 1.0]),
+            color=np.array([0.36, 0.3, 0.2]),
+        )
+        self.world.scene.add(seabed)
+        LOGGER.info("water surface at z=%.2f m, seabed %.1f m below", level, depth)
 
     def _add_fallback_lighting(self) -> None:
         from pxr import Sdf, UsdLux
@@ -1464,6 +1534,8 @@ class SimManager:
                     _quaternion(prop["orientation_wxyz"], "orientation_wxyz")
                 )
             self._isaac.SingleXFormPrim(prim_path).set_world_pose(**pose)
+            if prop.get("buoyancy"):
+                self._isaac_body_for_prop(prop, prim_path)
             return
 
         if kind != "cube":
@@ -1483,6 +1555,8 @@ class SimManager:
             kwargs["scale"] = np.array([float(v) for v in prop["scale"]])
         if prop.get("color") is not None:
             kwargs["color"] = np.array([float(v) for v in prop["color"]])
+        if prop.get("mass") is not None and not prop.get("fixed"):
+            kwargs["mass"] = float(prop["mass"])
         static_friction = float(prop.get("static_friction", 1.0))
         dynamic_friction = float(prop.get("dynamic_friction", 1.0))
         if static_friction < 0.0 or dynamic_friction < 0.0:
@@ -1502,29 +1576,48 @@ class SimManager:
         self.world.scene.add(spawned)
         if prop.get("visual_material") is not None:
             self._apply_visual_material(prim_path, str(prop["visual_material"]))
+        if prop.get("buoyancy"):
+            self._isaac_body_for_prop(prop, prim_path)
 
     def _apply_visual_material(self, prim_path: str, preset: str) -> None:
+        properties = _visual_material_properties(preset)
+        self._bind_preview_surface(
+            prim_path,
+            diffuse_color=properties["diffuse_color"],
+            roughness=properties["roughness"],
+            metallic=properties["metallic"],
+            material_suffix=preset,
+        )
+
+    def _bind_preview_surface(
+        self,
+        prim_path: str,
+        *,
+        diffuse_color: tuple[float, float, float],
+        roughness: float,
+        metallic: float,
+        opacity: float | None = None,
+        material_suffix: str = "material",
+    ) -> None:
+        """Bind a UsdPreviewSurface with the given look to a prim."""
         from pxr import Gf, Sdf, UsdShade
 
-        properties = _visual_material_properties(preset)
         prim = self._isaac.get_prim_at_path(prim_path)
         if prim is None or not prim.IsValid():
             raise ValueError(f"cannot bind visual material to missing prim {prim_path}")
         material_path = (
-            f"/World/Looks/{_prim_name(prim_path.rsplit('/', 1)[-1])}_{preset}"
+            f"/World/Looks/{_prim_name(prim_path.rsplit('/', 1)[-1])}_{material_suffix}"
         )
         material = UsdShade.Material.Define(prim.GetStage(), material_path)
         shader = UsdShade.Shader.Define(prim.GetStage(), f"{material_path}/Shader")
         shader.CreateIdAttr("UsdPreviewSurface")
         shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
-            Gf.Vec3f(*properties["diffuse_color"])
+            Gf.Vec3f(*diffuse_color)
         )
-        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(
-            properties["roughness"]
-        )
-        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(
-            properties["metallic"]
-        )
+        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(roughness)
+        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(metallic)
+        if opacity is not None:
+            shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(opacity)
         material.CreateSurfaceOutput().ConnectToSource(
             shader.ConnectableAPI(), "surface"
         )
@@ -1602,6 +1695,9 @@ class SimManager:
         if self.mock:
             pose = {"position": position, "orientation_wxyz": orientation}
             self._mock_prop_poses[name] = pose
+            body = self._bodies.get(name)
+            if body is not None:
+                body.set_pose(position, orientation)  # type: ignore[attr-defined]
             return pose
 
         import numpy as np
@@ -2459,6 +2555,172 @@ class SimManager:
         self.world.add_physics_callback(f"{name}_drive", handle._on_physics_step)
         return handle
 
+    # ------------------------------------------------------------------
+    # rigid bodies: floating props, thruster motors, movement sensors
+    # ------------------------------------------------------------------
+
+    def _mock_body_for_prop(self, prop: dict[str, Any]) -> "BodyHandle":
+        name = prop["name"]
+        if name in self._bodies:
+            return self._bodies[name]
+        water_level = self.cfg.water_level_m() if self.cfg is not None else 0.0
+        spec = BuoyancySpec.from_prop(prop, water_level)
+        pose = self._mock_prop_poses[name]
+        handle = MockBodyHandle(
+            self,
+            name,
+            spec,
+            float(prop.get("mass", 1.0)),
+            pose["position"],
+            pose["orientation_wxyz"],
+        )
+        self._bodies[name] = handle
+        self._bodies[f"/World/{name}"] = handle
+        return handle
+
+    def _isaac_body_for_prop(self, prop: dict[str, Any], prim_path: str) -> "BodyHandle":
+        """Wrap a just-spawned floating prop in a RigidPrim view and drive it
+        with the force model (runs on the sim thread before the
+        initial world.reset, which initializes the view)."""
+        water_level = self.cfg.water_level_m() if self.cfg is not None else 0.0
+        spec = BuoyancySpec.from_prop(prop, water_level)
+        name = prop["name"]
+        handle = self._isaac_body(name, prim_path, spec, initialize=False)
+        if spec is not None:
+            LOGGER.info(
+                "prop %r floats: %.2fx%.2fx%.2f m, %.1f kg, rest draft %.3f m",
+                name,
+                *spec.size_m,
+                spec.mass_kg,
+                spec.draft_m,
+            )
+        return handle
+
+    def _isaac_body(
+        self,
+        name: str,
+        prim_path: str,
+        spec: "BuoyancySpec | None",
+        initialize: bool,
+    ) -> "IsaacBodyHandle":
+        existing = self._bodies.get(prim_path)
+        if existing is not None:
+            return existing  # type: ignore[return-value]
+        self._require_prim(prim_path)
+        view = self._isaac.RigidPrim(prim_paths_expr=prim_path, name=f"{_prim_name(name)}_body")
+        self.world.scene.add(view)
+        if initialize:
+            # created while the sim is already running: no world.reset,
+            # which would teleport everything back to its spawn pose
+            view.initialize()
+        positions, orientations = view.get_world_poses()
+        spawn_position = tuple(float(v) for v in positions[0])
+        spawn_orientation = tuple(float(v) for v in orientations[0])
+        handle = IsaacBodyHandle(self, name, spec, spawn_position, spawn_orientation, view)
+        self.world.add_physics_callback(f"{_prim_name(name)}_body", handle._on_physics_step)
+        self._bodies[name] = handle
+        self._bodies[prim_path] = handle
+        return handle
+
+    def body(self, attrs: dict[str, Any], for_resource: str) -> "BodyHandle":
+        """The rigid body a motor or movement sensor attaches to: a prop by
+        name, or (with isaac) any rigid-body prim by path."""
+        self._require_booted()
+        prop = attrs.get("prop")
+        prim_path = attrs.get("prim_path")
+        if prop:
+            prim_name = _prim_name(str(prop))
+            if prim_name not in self._prop_specs:
+                raise ValueError(
+                    f"{for_resource}: unknown prop {prop!r}; the world has "
+                    f"{sorted(self._prop_specs)}"
+                )
+            spec = self._prop_specs[prim_name]
+            if spec.get("fixed"):
+                raise ValueError(f"{for_resource}: prop {prop!r} is fixed and cannot move")
+            if self.mock:
+                return self._mock_body_for_prop(spec)
+            existing = self._bodies.get(prim_name)
+            if existing is not None:
+                return existing
+            return self.run(
+                lambda: self._isaac_body(prim_name, f"/World/{prim_name}", None, initialize=True),
+                timeout=60.0,
+            )
+        if prim_path:
+            existing = self._bodies.get(str(prim_path))
+            if existing is not None:
+                return existing
+            if self.mock:
+                raise ValueError(
+                    f"{for_resource}: mock mode knows props, not prim paths; set prop"
+                )
+            return self.run(
+                lambda: self._isaac_body(
+                    str(prim_path).rsplit("/", 1)[-1], str(prim_path), None, initialize=True
+                ),
+                timeout=60.0,
+            )
+        raise ValueError(f'{for_resource}: set "prop" (a world prop name) or "prim_path"')
+
+    def create_motor(self, name: str, attrs: dict[str, Any]) -> "MotorHandle":
+        from .spatial import to_vec3
+
+        body = self.body(attrs, f"motor {name}")
+        max_thrust = float(attrs.get("max_thrust_n", 20.0))
+        reverse_thrust = float(attrs.get("reverse_thrust_n", max_thrust))
+        max_rpm = float(attrs.get("max_rpm", 3000.0))
+        for label, value in (
+            ("max_thrust_n", max_thrust),
+            ("reverse_thrust_n", reverse_thrust),
+            ("max_rpm", max_rpm),
+        ):
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"motor {name}: {label} must be finite and positive")
+        position = to_vec3(attrs.get("position"))
+        direction = to_vec3(attrs.get("direction"), (1.0, 0.0, 0.0))
+
+        existing = self._handles.get(name)
+        if existing is not None:
+            old_attrs, handle = existing
+            if not isinstance(handle, MotorHandle):
+                raise TypeError(f"cached resource {name!r} is not a motor")
+            placement = ("prop", "prim_path", "position", "direction")
+            if handle.body is not body or any(
+                old_attrs.get(key) != attrs.get(key) for key in placement
+            ):
+                if handle.body is not body:
+                    handle.detach()
+                # re-registering by name replaces the thruster in place and
+                # carries its odometry over
+                state = body.register_thruster(name, position, direction)
+                handle = MotorHandle(body, state, max_thrust, reverse_thrust, max_rpm)
+            else:
+                handle.update_limits(max_thrust, reverse_thrust, max_rpm)
+            self._handles[name] = (dict(attrs), handle)
+            return handle
+
+        state = body.register_thruster(name, position, direction)
+        handle = MotorHandle(body, state, max_thrust, reverse_thrust, max_rpm)
+        self._handles[name] = (dict(attrs), handle)
+        return handle
+
+    def create_movement_sensor(
+        self, name: str, attrs: dict[str, Any]
+    ) -> "MovementSensorHandle":
+        body = self.body(attrs, f"movement_sensor {name}")
+        spec = MovementSensorSpec.from_attrs(attrs)
+        existing = self._handles.get(name)
+        if existing is not None:
+            _old_attrs, handle = existing
+            if isinstance(handle, MovementSensorHandle) and handle.body is body:
+                handle.update_spec(spec)
+                self._handles[name] = (dict(attrs), handle)
+                return handle
+        handle = MovementSensorHandle(body, spec)
+        self._handles[name] = (dict(attrs), handle)
+        return handle
+
 
 def _local_ip() -> str:
     """Best-effort primary local IP (no traffic is actually sent)."""
@@ -2575,6 +2837,12 @@ def _import_isaac():
         from omni.isaac.wheeled_robots.robots import WheeledRobot
     ns.WheeledRobot = WheeledRobot
     ns.DifferentialController = DifferentialController
+
+    try:
+        from isaacsim.core.prims import RigidPrim
+    except ImportError:
+        from omni.isaac.core.prims import RigidPrimView as RigidPrim
+    ns.RigidPrim = RigidPrim
 
     return ns
 
@@ -3855,6 +4123,58 @@ class MockBaseHandle(BaseHandle):
     def is_moving(self) -> bool:
         with self._lock:
             return self._cmd != (0.0, 0.0)
+
+
+class IsaacBodyHandle(BodyHandle):
+    """A PhysX rigid body driven by the shared force model: every physics
+    step reads the body's pose and velocities, sums buoyancy, drag and
+    thruster forces, and applies them as one wrench at the body origin
+    (PhysX accepts a single force-at-position per body per step)."""
+
+    def __init__(
+        self,
+        sim: SimManager,
+        name: str,
+        spec: "BuoyancySpec | None",
+        spawn_position: tuple[float, float, float],
+        spawn_orientation: tuple[float, float, float, float],
+        view,
+    ) -> None:
+        super().__init__(name, spec, spawn_position, spawn_orientation)
+        self._sim = sim
+        self._view = view
+        self._warned = False
+
+    def _on_physics_step(self, step_size: float) -> None:
+        import numpy as np
+
+        try:
+            positions, orientations = self._view.get_world_poses()
+            velocities = self._view.get_velocities()
+            position = tuple(float(v) for v in np.asarray(positions)[0])
+            orientation = tuple(float(v) for v in np.asarray(orientations)[0])
+            velocity = np.asarray(velocities)[0]
+            linear = tuple(float(v) for v in velocity[:3])
+            angular = tuple(float(v) for v in velocity[3:6])
+            force, torque = self._wrench(position, orientation, linear, angular)
+            if any(force) or any(torque):
+                self._view.apply_forces_and_torques_at_pos(
+                    forces=np.array([force], dtype=np.float32),
+                    torques=np.array([torque], dtype=np.float32),
+                    is_global=True,
+                )
+            self._publish(
+                position,
+                orientation,
+                linear,
+                angular,
+                float(step_size),
+                float(self._sim.world.current_time),
+            )
+        except Exception:
+            if not self._warned:
+                LOGGER.exception("error stepping body %r", self.name)
+                self._warned = True
 
 
 UNRESOLVABLE_ASSET_HOST = "isaac-dev"
