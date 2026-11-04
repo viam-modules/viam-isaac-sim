@@ -425,6 +425,18 @@ The defaults suit a ~1 m unmanned surface vessel: with two 49 N thrusters a
 / `park_props` commands work on a floating prop (`set_prop_pose` also stops it),
 which is how a docking attempt is reset to a known approach.
 
+#### A real marina from OpenStreetMap
+
+`examples/osm_marina/osm_to_props.py` turns OSM pier, marina and coastline
+ways into world props: fixed piers get a raised deck on pilings with a wave
+screen, floating docks sit at the waterline, unnamed floating ways become
+finger piers, and the coastline becomes a seawall. It anchors the sim's
++X east / +Y north frame at the marina polygon's centroid and prints that as
+the `origin` for a `movement_sensor`, so `GetPosition` reports real lat/lon.
+`79th-street-boat-basin.osm.json` is the input for Manhattan's 79th Street
+Boat Basin (A, B and C docks, ~50 finger piers), fetched from the OSM map
+API and filtered to waterfront features.
+
 #### motor (thruster) attributes
 
 `world` and `prop` (or `prim_path`) are required. `position` (meters, body
