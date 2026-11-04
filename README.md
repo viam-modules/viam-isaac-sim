@@ -25,6 +25,8 @@ What it is/does
 | `viam-labs:isaac-sim:gripper` | `gripper` | Exposes a supported parallel gripper, including the Lite 6's integrated gripper. |
 | `viam-labs:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves its RGB frames. |
 | `viam-labs:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
+| `viam-labs:isaac-sim:motor` | `motor` | A thruster that pushes a rigid body (a floating prop, say); two of them steer by differential thrust. |
+| `viam-labs:isaac-sim:movement_sensor` | `movement_sensor` | GPS, IMU and compass readings from a rigid body. |
 
 Known robot assets (usable via the `asset` attribute): `lite6`, `ur3e`, `ur5e`,
 `ur10`, `ur10e`, `ur16e`, `ur20`, `franka`, and `jetbot`. Known grippers
@@ -190,6 +192,7 @@ overrides orientation to aim at a point.
 | `capture_rate_hz` | `15` | episode capture rate in simulator time |
 | `boot_timeout_sec` | `300` | Isaac Sim can take a while on first boot |
 | `kit_log_level` | `warning` | kit console verbosity |
+| `water` | _none_ | `{"level_m": 0, "size_m": 400, "depth_m": 10, "color": [r,g,b]}`: a flat water surface for floating props. Replaces the default ground plane with a visual surface (no collision) at `level_m` and a seabed collider `depth_m` below it |
 
 The world supports low-level `DoCommand` operations for pre-created props. Use
 `set_prop_pose` to place a prop at a specific world pose:
@@ -352,6 +355,104 @@ whose FK falls below the configured floor.
 `world` (required), `asset` (e.g. `jetbot`, which brings wheel defaults) or
 `usd_path`/`prim_path` plus `wheel_joints: [left, right]`, `wheel_radius`,
 `wheel_base`. `max_linear_mps` / `max_angular_rps` scale `SetPower`.
+
+### Floating props, thrusters and movement sensors
+
+Any dynamic prop can float: give it a `mass` and a `buoyancy` block, and put
+`water` on the world so there is a surface. Every physics step the module sums
+buoyancy, hydrodynamic drag and the thrusters attached to that body into one
+wrench and applies it through PhysX, so the prop heaves, rolls, pitches and
+yaws like a boat and collides with other props (docks, pilings) like anything
+else in the stage. `motor` components push a body, `movement_sensor`
+components read one, and both name it by prop (or, with Isaac, by `prim_path`
+for any rigid-body prim already in the stage).
+
+Body frame: +X forward, +Y left, +Z up, origin at the prop's origin (a cube's
+center). The world's +X is east and +Y north for the movement sensor's GPS and
+compass.
+
+```json
+{
+  "name": "sim-world", "model": "viam-labs:isaac-sim:world", "type": "generic",
+  "attributes": {
+    "water": { "level_m": 0, "size_m": 300, "depth_m": 6 },
+    "props": [
+      { "name": "boat", "type": "cube", "size": 1, "scale": [1.0, 0.6, 0.3],
+        "position": [0, 0, 0.1], "mass": 20, "color": [0.9, 0.9, 0.85],
+        "buoyancy": true },
+      { "name": "piling", "type": "cube", "fixed": true,
+        "position": [5, 5, 0.5], "scale": [0.3, 0.3, 2] }
+    ]
+  }
+},
+{
+  "name": "left-thruster", "model": "viam-labs:isaac-sim:motor", "type": "motor",
+  "attributes": { "world": "sim-world", "prop": "boat",
+                  "position": [-0.45, 0.25, -0.1], "max_thrust_n": 49 }
+},
+{
+  "name": "right-thruster", "model": "viam-labs:isaac-sim:motor", "type": "motor",
+  "attributes": { "world": "sim-world", "prop": "boat",
+                  "position": [-0.45, -0.25, -0.1], "max_thrust_n": 49 }
+},
+{
+  "name": "nav", "model": "viam-labs:isaac-sim:movement_sensor", "type": "movement_sensor",
+  "attributes": { "world": "sim-world", "prop": "boat",
+                  "origin": { "latitude": 40.7858, "longitude": -73.9846 } }
+}
+```
+
+#### prop `buoyancy` block
+
+`"buoyancy": true` takes every default from the prop (a cube's `size * scale`
+and its `mass`); an object overrides:
+
+| key | default | notes |
+|---|---|---|
+| `size_m` | cube `size * scale` | `[length, width, height]`; required for a `usd` prop, whose root prim must already carry `RigidBodyAPI` (the configured `mass` is applied to it) |
+| `waterplane_area_m2` | length × width | sets the rest draft (`mass / (density * area)`); a catamaran is smaller than its footprint |
+| `points` | the four corners at ±L/4, ±W/4 | `[[x, y], ...]` body-frame sample points; each is a water column that pushes up by how deep that point sits, which is what gives roll and pitch restoring moments |
+| `bottom_z_m` | −height / 2 | body-frame z of the underside |
+| `water_level_m` | world `water.level_m` | |
+| `water_density` | `1000` | kg/m³ |
+| `linear_damping` | `[2, 20, 150]` | surge, sway, heave N·s/m |
+| `quadratic_damping` | `[4.5, 60, 80]` | surge, sway, heave N·s²/m² |
+| `angular_damping` | `[5, 5, 3]` | roll, pitch, yaw N·m·s |
+| `angular_quadratic_damping` | `[2, 2, 8]` | roll, pitch, yaw N·m·s² |
+
+The defaults suit a ~1 m unmanned surface vessel: with two 49 N thrusters a
+20 kg box tops out near 4.5 m/s. The world's `get_prop_pose` / `set_prop_pose`
+/ `park_props` commands work on a floating prop (`set_prop_pose` also stops it),
+which is how a docking attempt is reset to a known approach.
+
+#### motor (thruster) attributes
+
+`world` and `prop` (or `prim_path`) are required. `position` (meters, body
+frame, default the origin) is where it pushes and `direction` (body frame,
+default `[1, 0, 0]`) which way at full forward power. `max_thrust_n` (default
+20) is the push at full forward power, `reverse_thrust_n` (default
+`max_thrust_n`) at full reverse, and `max_rpm` (default 3000) only scales
+`SetRPM` and the odometry: the thruster has no encoder, so `GetPosition`
+integrates the commanded rpm in simulator time, and `GoFor` / `GoTo` wait on
+that odometry (not the wall clock), so they stay correct when Isaac runs
+slower than real time and time out if it is paused. `SetPower` is the real control. Two
+thrusters either side of the centerline steer by differential thrust, and
+`rdk:builtin:wheeled` drives them as a `base` for the app's control tab and
+the navigation service.
+
+#### movement_sensor attributes
+
+`world` and `prop` (or `prim_path`) are required. `origin` (`{latitude,
+longitude, altitude_m}`) is the geographic location of the sim world origin,
+so `GetPosition` reports real lat/lon with world +X as east and +Y as north.
+`GetLinearVelocity` is in the world frame (m/s); `GetAngularVelocity` (deg/s)
+and `GetLinearAcceleration` (m/s²) are in the body frame, the latter as
+IMU-style specific force (+9.81 on z at rest; `include_gravity: false` for
+pure motion); `GetCompassHeading` is the bearing of the body's +X axis
+clockwise from north; `GetOrientation` is the body's world orientation.
+`position_noise_m`, `heading_noise_deg` and `velocity_noise_mps` add gaussian
+noise (`seed` fixes the stream). `GetReadings` returns all of it plus
+`sim_position_m`, `yaw_deg` and `speed_mps`.
 
 ## Pick-and-place fragment
 
@@ -708,7 +809,9 @@ development.
 
 Set `"mock": true` on the world component and the module runs anywhere python
 does - arms integrate joint targets over time, cameras produce synthetic
-frames, bases accept velocity commands. This is what the test suite uses:
+frames, bases accept velocity commands, and floating props integrate the
+same buoyancy/drag/thruster force model in the plane so a boat actually
+moves. This is what the test suite uses:
 
 ```sh
 python3 -m venv .venv
@@ -731,4 +834,5 @@ python3 -m venv .venv
 - [x] serve kinematics files (`GetKinematics`) so Viam's motion service can do
       IK and planning for simulated arms (all motion stays in Viam, not Isaac)
 - [ ] depth / point clouds from cameras
+- [x] floating props (buoyancy + drag), thruster motors, GPS/IMU movement sensor, water
 - [x] UR-mounted Robotiq 2F-85 gripper support

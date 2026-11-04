@@ -40,7 +40,17 @@ Attributes:
                                        "size" (m), "scale" [sx,sy,sz],
                                        "color" [r,g,b] 0-1, "fixed" (bool),
                                        "visual_material": "wood"|"brushed_metal",
-                                       "usd_path" (for type usd)}
+                                       "usd_path" (for type usd),
+                                       "mass" (kg, dynamic props),
+                                       "buoyancy": true | {...} (the prop floats
+                                       on the world's water; see
+                                       bodies.BuoyancySpec for the block)}
+  water (object)                    - a flat water surface for floating props:
+                                      {"level_m": 0, "size_m": 400,
+                                      "depth_m": 10, "color": [r,g,b]}. Replaces
+                                      the default ground plane with a visual
+                                      surface (no collision) and a seabed
+                                      collider depth_m below it
 
 DoCommand:
   {"command": "status"} | {"command": "play"} | {"command": "pause"} |
@@ -121,6 +131,15 @@ class IsaacWorld(Generic, EasyResource):
                 float(attrs.get("physics_dt", 1.0 / 60.0)),
                 float(attrs["rendering_dt"]),
             )
+        water = attrs.get("water")
+        if water is not None:
+            if not isinstance(water, dict):
+                raise ValueError("water must be an object: {level_m, size_m, depth_m, color}")
+            for key in ("size_m", "depth_m"):
+                if key in water and float(water[key]) <= 0.0:
+                    raise ValueError(f"water.{key} must be positive")
+            if "level_m" in water and not math.isfinite(float(water["level_m"])):
+                raise ValueError("water.level_m must be finite")
         return [], []
 
     def reconfigure(
@@ -148,6 +167,7 @@ class IsaacWorld(Generic, EasyResource):
             livestream_height=int(attrs.get("livestream_height", 720)),
             props=[dict(p) for p in attrs.get("props", [])],
             isaac_default_environment=bool(attrs.get("isaac_default_environment", True)),
+            water=dict(attrs["water"]) if attrs.get("water") is not None else None,
         )
         SimManager.get().ensure_booted(cfg)
 

@@ -28,6 +28,16 @@
       "model": "viam-labs:isaac-sim:base",
       "api": "rdk:component:base",
       "short_description": "A simulated differential-drive base"
+    },
+    {
+      "model": "viam-labs:isaac-sim:motor",
+      "api": "rdk:component:motor",
+      "short_description": "A thruster that pushes a simulated rigid body (e.g. a floating prop)"
+    },
+    {
+      "model": "viam-labs:isaac-sim:movement_sensor",
+      "api": "rdk:component:movement_sensor",
+      "short_description": "GPS, IMU and compass readings from a simulated rigid body"
     }
   ],
   "entrypoint": "run.sh",
