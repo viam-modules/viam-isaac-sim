@@ -68,7 +68,8 @@ Attributes:
                                        see the world state store below}
   water (object)                    - a flat water surface for floating props:
                                       {"level_m": 0, "size_m": 400,
-                                      "depth_m": 10, "color": [r,g,b]}. Replaces
+                                      "depth_m": 10, "color": [r,g,b],
+                                      "roughness": 0.6 (0 mirror .. 1 matte)}. Replaces
                                       the default ground plane with a visual
                                       surface (no collision) and a seabed
                                       collider depth_m below it
@@ -227,6 +228,8 @@ class IsaacWorld(Generic, EasyResource):
                     raise ValueError(f"water.{key} must be positive")
             if "level_m" in water and not math.isfinite(float(water["level_m"])):
                 raise ValueError("water.level_m must be finite")
+            if "roughness" in water and not 0.0 <= float(water["roughness"]) <= 1.0:
+                raise ValueError("water.roughness must be between 0 and 1")
         quality = attrs.get("render_quality", "default")
         if not isinstance(quality, str) or quality not in RENDER_QUALITY_PRESETS:
             raise ValueError(
