@@ -192,7 +192,7 @@ overrides orientation to aim at a point.
 | `capture_rate_hz` | `15` | episode capture rate in simulator time |
 | `boot_timeout_sec` | `300` | Isaac Sim can take a while on first boot |
 | `kit_log_level` | `warning` | kit console verbosity |
-| `water` | _none_ | `{"level_m": 0, "size_m": 400, "depth_m": 10, "color": [r,g,b]}`: a flat water surface for floating props. Replaces the default ground plane with a visual surface (no collision) at `level_m` and a seabed collider `depth_m` below it |
+| `water` | _none_ | `{"level_m": 0, "size_m": 400, "depth_m": 10, "color": [r,g,b], "roughness": 0.6}`: a flat water surface for floating props (`roughness` 0 is a mirror that reflects the sun into overhead cameras, 1 is matte). Replaces the default ground plane with a visual surface (no collision) at `level_m` and a seabed collider `depth_m` below it |
 
 The world supports low-level `DoCommand` operations for pre-created props. Use
 `set_prop_pose` to place a prop at a specific world pose:

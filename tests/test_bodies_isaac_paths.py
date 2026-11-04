@@ -255,6 +255,11 @@ def test_spawn_water_adds_a_translucent_surface_and_a_seabed(fake_pxr):
     assert ops["translate"].value == ("Vec3d", 0.0, 0.0, 0.49)
     assert ops["scale"].value == ("Vec3f", 100.0, 100.0, 0.02)
     assert fake_pxr.shader.inputs["opacity"].value == 0.8
+    assert fake_pxr.shader.inputs["roughness"].value == 0.6
+    manager._spawn_water({"roughness": 0.2})
+    assert fake_pxr.shader.inputs["roughness"].value == 0.2
+    with pytest.raises(ValueError, match="roughness"):
+        manager._spawn_water({"roughness": 1.5})
     kind, kwargs = added[0]
     assert kind == "FixedCuboid"
     assert kwargs["position"][2] == pytest.approx(0.5 - 4 - 0.5)

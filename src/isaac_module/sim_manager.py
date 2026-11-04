@@ -252,7 +252,8 @@ class SimConfig:
     # collider AND the lighting rig; when false, we add fallback lights
     isaac_default_environment: bool = True
     # a flat water surface for floating props:
-    #   {"level_m": 0.0, "size_m": 400, "depth_m": 10, "color": [r,g,b]}
+    #   {"level_m": 0.0, "size_m": 400, "depth_m": 10, "color": [r,g,b],
+    #    "roughness": 0.6}
     # Replaces the default ground plane with a visual surface at level_m
     # (no collision) and a seabed collider depth_m below it.
     water: dict[str, Any] | None = None
@@ -1468,8 +1469,13 @@ class SimManager:
         size = float(water.get("size_m", 400.0))
         depth = float(water.get("depth_m", 10.0))
         color = [float(v) for v in water.get("color", (0.03, 0.22, 0.38))]
+        # a glossy surface mirrors the sun into any camera looking down at
+        # it; matte by default, lower for a calm-water look up close
+        roughness = float(water.get("roughness", 0.6))
         if size <= 0.0 or depth <= 0.0:
             raise ValueError("water size_m and depth_m must be positive")
+        if not 0.0 <= roughness <= 1.0:
+            raise ValueError("water roughness must be between 0 and 1")
 
         stage = self.world.stage
         UsdGeom.Xform.Define(stage, Sdf.Path("/World/Water"))
@@ -1481,7 +1487,7 @@ class SimManager:
         self._bind_preview_surface(
             "/World/Water/Surface",
             diffuse_color=tuple(color),
-            roughness=0.15,
+            roughness=roughness,
             metallic=0.0,
             opacity=0.8,
         )
