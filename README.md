@@ -409,7 +409,7 @@ and its `mass`); an object overrides:
 
 | key | default | notes |
 |---|---|---|
-| `size_m` | cube `size * scale` | `[length, width, height]`; required for a `usd` prop |
+| `size_m` | cube `size * scale` | `[length, width, height]`; required for a `usd` prop, whose root prim must already carry `RigidBodyAPI` (the configured `mass` is applied to it) |
 | `waterplane_area_m2` | length × width | sets the rest draft (`mass / (density * area)`); a catamaran is smaller than its footprint |
 | `points` | the four corners at ±L/4, ±W/4 | `[[x, y], ...]` body-frame sample points; each is a water column that pushes up by how deep that point sits, which is what gives roll and pitch restoring moments |
 | `bottom_z_m` | −height / 2 | body-frame z of the underside |
@@ -433,8 +433,9 @@ default `[1, 0, 0]`) which way at full forward power. `max_thrust_n` (default
 20) is the push at full forward power, `reverse_thrust_n` (default
 `max_thrust_n`) at full reverse, and `max_rpm` (default 3000) only scales
 `SetRPM` and the odometry: the thruster has no encoder, so `GetPosition`
-integrates the commanded rpm in simulator time, which makes `GoFor` and
-`GoTo` behave like the fake motor's. `SetPower` is the real control. Two
+integrates the commanded rpm in simulator time, and `GoFor` / `GoTo` wait on
+that odometry (not the wall clock), so they stay correct when Isaac runs
+slower than real time and time out if it is paused. `SetPower` is the real control. Two
 thrusters either side of the centerline steer by differential thrust, and
 `rdk:builtin:wheeled` drives them as a `base` for the app's control tab and
 the navigation service.

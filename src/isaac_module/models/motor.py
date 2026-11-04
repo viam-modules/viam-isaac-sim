@@ -24,6 +24,7 @@ the fake motor's. SetPower is the real control input.
 """
 
 import asyncio
+import time
 from typing import Any, ClassVar, Dict, Mapping, Optional, Sequence, Tuple
 
 from typing_extensions import Self
@@ -59,6 +60,10 @@ def validate_body_attached(config: ComponentConfig) -> Tuple[Sequence[str], Sequ
             '"prim_path" (a rigid-body prim in the stage)'
         )
     return [world], []
+
+
+GO_FOR_POLL_S = 0.02
+GO_FOR_STALL_TIMEOUT_S = 30.0
 
 
 class IsaacMotor(Motor, EasyResource):
@@ -122,18 +127,42 @@ class IsaacMotor(Motor, EasyResource):
             return
         direction = 1.0 if (rpm > 0) == (revolutions > 0) else -1.0
         speed = min(abs(rpm), handle.max_rpm)
-        duration = abs(revolutions) / speed * 60.0
+        target = handle.revolutions() + direction * abs(revolutions)
         handle.set_rpm(direction * speed)
-        sleeper = asyncio.ensure_future(asyncio.sleep(duration))
-        self._go_task = sleeper
+        # Revolutions are integrated in simulator time, which runs slower
+        # than the wall clock when Isaac is rendering (and stops when it is
+        # paused), so wait on the odometry rather than on a wall-clock sleep.
+        waiter = asyncio.ensure_future(self._wait_for_revolutions(target, direction))
+        self._go_task = waiter
         try:
-            await sleeper
+            await waiter
         except asyncio.CancelledError:
             return  # superseded; the newer command owns the motor now
         finally:
-            if self._go_task is sleeper:
+            if self._go_task is waiter:
                 self._go_task = None
         handle.stop()
+
+    async def _wait_for_revolutions(self, target: float, direction: float) -> None:
+        handle = self._h()
+        sim = SimManager.get()
+        started_sim_s = sim.sim_time_s()
+        stalled_since = time.monotonic()
+        while True:
+            revolutions = handle.revolutions()
+            if (revolutions - target) * direction >= 0.0:
+                return
+            await asyncio.sleep(GO_FOR_POLL_S)
+            # a paused simulator never advances; give up after a while
+            # instead of holding the RPC open forever
+            if sim.sim_time_s() > started_sim_s:
+                started_sim_s = sim.sim_time_s()
+                stalled_since = time.monotonic()
+            elif time.monotonic() - stalled_since > GO_FOR_STALL_TIMEOUT_S:
+                handle.stop()
+                raise TimeoutError(
+                    f"motor {self.name}: simulator time stopped advancing during GoFor"
+                )
 
     async def go_to(self, rpm: float, position_revolutions: float, **kwargs) -> None:
         handle = self._h()
@@ -154,6 +183,17 @@ class IsaacMotor(Motor, EasyResource):
     async def stop(self, **kwargs) -> None:
         self._cancel_go()
         self._h().stop()
+
+    async def close(self) -> None:
+        """viam-server removed or renamed this motor: take the thruster off
+        the body (stop() has already zeroed it) and drop the cached handle."""
+        self._cancel_go()
+        handle = self._handle
+        if handle is not None:
+            handle.stop()
+            handle.detach()
+            self._handle = None
+        SimManager.get().remove_handle(self.name)
 
     async def is_powered(self, **kwargs) -> Tuple[bool, float]:
         power = self._h().power()

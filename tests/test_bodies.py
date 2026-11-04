@@ -527,3 +527,116 @@ def test_isaac_body_handle_survives_a_physics_error_once():
     handle._on_physics_step(0.01)
     assert view.applied == []
     assert handle._warned is True
+
+
+# ----------------------------------------------------------------------
+# review follow-ups
+# ----------------------------------------------------------------------
+
+
+def test_mock_get_prop_pose_follows_the_moving_body(boat):
+    """get_prop_pose reports where the body is now, not where it spawned."""
+    _park(boat)
+    start = _run(boat.world.do_command({"command": "get_prop_pose", "prop": "boat"}))
+    _run(boat.left.set_power(1.0))
+    _run(boat.right.set_power(1.0))
+    time.sleep(0.6)
+    moved = _run(boat.world.do_command({"command": "get_prop_pose", "prop": "boat"}))
+    _run(boat.left.stop())
+    _run(boat.right.stop())
+    assert moved["pose"]["position"][0] > start["pose"]["position"][0] + 0.2
+    readings = _run(boat.sensor.get_readings())
+    assert moved["pose"]["position"][0] == pytest.approx(readings["sim_position_m"]["x"], abs=0.1)
+
+
+def test_mock_set_prop_pose_returns_the_floated_z(boat):
+    """A body snaps to its rest draft; the reported pose says so."""
+    result = _run(
+        boat.world.do_command(
+            {
+                "command": "set_prop_pose",
+                "prop": "boat",
+                "position": [1.0, 1.0, 5.0],
+                "orientation_wxyz": [1.0, 0.0, 0.0, 0.0],
+            }
+        )
+    )
+    assert result["position"][2] == pytest.approx(_spec().rest_z_m)
+    queried = _run(boat.world.do_command({"command": "get_prop_pose", "prop": "boat"}))
+    assert queried["pose"]["position"][2] == pytest.approx(_spec().rest_z_m)
+    _park(boat)
+
+
+def test_teleport_does_not_spike_the_imu(boat):
+    _park(boat)
+    _run(boat.left.set_power(1.0))
+    _run(boat.right.set_power(1.0))
+    time.sleep(0.5)
+    _run(boat.left.stop())
+    _run(boat.right.stop())
+    # teleport while still moving fast, then read the very next samples
+    _run(boat.world.do_command({"command": "park_props", "props": ["boat"]}))
+    worst = 0.0
+    for _ in range(5):
+        accel = _run(boat.sensor.get_linear_acceleration())
+        worst = max(worst, abs(accel.x), abs(accel.y))
+        time.sleep(0.02)
+    assert worst < 5.0  # a 1.5 m/s jump over one 10 ms step would read 150+
+
+
+def test_removed_motor_detaches_from_the_body(world):
+    extra = IsaacMotor.new(
+        _config("extra-thruster", {"world": "sim-world", "prop": "boat", "position": [0, 0, 0]}),
+        {},
+    )
+    body = extra._h().body
+    _run(extra.set_power(0.5))
+    assert "extra-thruster" in {t.name for t in body.thrusters()}
+    _run(extra.close())
+    assert "extra-thruster" not in {t.name for t in body.thrusters()}
+    assert "extra-thruster" not in SimManager.get()._handles
+    with pytest.raises(RuntimeError, match="not attached"):
+        _run(extra.set_power(0.5))
+
+
+def test_go_for_waits_on_sim_time_odometry(boat, monkeypatch):
+    _park(boat)
+    _run(boat.left.reset_zero_position(0.0))
+    handle = boat.left._h()
+    # freeze the clock the odometry integrates against: a wall-clock sleep
+    # would return long before the revolutions arrive
+    original_tick = handle._state.tick
+    ticks = []
+
+    def slow_tick(dt):
+        ticks.append(dt)
+        original_tick(dt * 0.25)
+
+    monkeypatch.setattr(handle._state, "tick", slow_tick)
+    started = time.monotonic()
+    _run(boat.left.go_for(rpm=3000, revolutions=5))  # 0.1 s of sim time at max rpm
+    elapsed = time.monotonic() - started
+    assert elapsed > 0.3  # four times slower than the wall clock
+    assert _run(boat.left.get_position()) == pytest.approx(5.0, abs=1.0)
+    assert not _run(boat.left.is_moving())
+
+
+def test_go_for_times_out_when_the_sim_is_paused(boat, monkeypatch):
+    import isaac_module.models.motor as motor_module
+
+    _park(boat)
+    handle = boat.left._h()
+    monkeypatch.setattr(handle._state, "tick", lambda dt: None)  # odometry frozen
+    monkeypatch.setattr(SimManager.get(), "sim_time_s", lambda: 1.0)  # clock frozen
+    monkeypatch.setattr(motor_module, "GO_FOR_STALL_TIMEOUT_S", 0.1)
+    with pytest.raises(TimeoutError, match="stopped advancing"):
+        _run(boat.left.go_for(rpm=3000, revolutions=5))
+    assert not _run(boat.left.is_moving())
+
+
+def test_prim_path_bodies_are_keyed_by_full_path():
+    from isaac_module.sim_manager import _body_key
+
+    assert _body_key("/World/A/hull") == "World_A_hull"
+    assert _body_key("/World/B/hull") == "World_B_hull"
+    assert _body_key("/World/A/hull") != _body_key("/World/B/hull")

@@ -1534,6 +1534,10 @@ class SimManager:
                     _quaternion(prop["orientation_wxyz"], "orientation_wxyz")
                 )
             self._isaac.SingleXFormPrim(prim_path).set_world_pose(**pose)
+            if prop.get("mass") is not None and not prop.get("fixed"):
+                # the buoyancy model computes lift from this mass, so PhysX
+                # has to agree with it
+                self._apply_rigid_body_mass(prim_path, float(prop["mass"]), name)
             if prop.get("buoyancy"):
                 self._isaac_body_for_prop(prop, prim_path)
             return
@@ -1578,6 +1582,23 @@ class SimManager:
             self._apply_visual_material(prim_path, str(prop["visual_material"]))
         if prop.get("buoyancy"):
             self._isaac_body_for_prop(prop, prim_path)
+
+    def _apply_rigid_body_mass(self, prim_path: str, mass_kg: float, name: str) -> None:
+        """Set a referenced USD prop's mass. The prim has to be a rigid body
+        already (a USD without RigidBodyAPI is scenery, and wrapping it in a
+        RigidPrim view would fail later with a confusing tensor error)."""
+        from pxr import UsdPhysics
+
+        prim = self._isaac.get_prim_at_path(prim_path)
+        if prim is None or not prim.IsValid():
+            raise ValueError(f"prop {name}: prim {prim_path} was not created")
+        if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            raise ValueError(
+                f"prop {name}: the usd at {prim_path} has no RigidBodyAPI on its "
+                "root prim, so it cannot have a mass or float; reference a usd "
+                "whose root is a rigid body, or use a cube prop"
+            )
+        UsdPhysics.MassAPI.Apply(prim).CreateMassAttr(mass_kg)
 
     def _apply_visual_material(self, prim_path: str, preset: str) -> None:
         properties = _visual_material_properties(preset)
@@ -1692,12 +1713,19 @@ class SimManager:
         position: tuple[float, float, float],
         orientation: tuple[float, float, float, float],
     ) -> dict[str, Any]:
+        body = self._bodies.get(name)
         if self.mock:
-            pose = {"position": position, "orientation_wxyz": orientation}
-            self._mock_prop_poses[name] = pose
-            body = self._bodies.get(name)
             if body is not None:
+                # the body snaps to its rest draft; record where it ended up
                 body.set_pose(position, orientation)  # type: ignore[attr-defined]
+                state = body.get_state()
+                pose = {
+                    "position": state.position,
+                    "orientation_wxyz": state.orientation_wxyz,
+                }
+            else:
+                pose = {"position": position, "orientation_wxyz": orientation}
+            self._mock_prop_poses[name] = pose
             return pose
 
         import numpy as np
@@ -1713,6 +1741,10 @@ class SimManager:
             setter = getattr(scene_object, setter_name, None)
             if setter is not None:
                 setter(np.zeros(3))
+        if body is not None:
+            # a teleport is not an acceleration: drop the velocity history
+            # the IMU differentiates, or the next step reports a spike
+            body.reset_motion(position, orientation)
         return {"position": position, "orientation_wxyz": orientation}
 
     def get_prop_pose(self, name: str) -> dict[str, Any]:
@@ -1721,6 +1753,14 @@ class SimManager:
 
         def read() -> dict[str, Any]:
             if self.mock:
+                body = self._bodies.get(prim_name)
+                if body is not None:
+                    # a body under thrust has moved since it was spawned
+                    state = body.get_state()
+                    return {
+                        "position": state.position,
+                        "orientation_wxyz": state.orientation_wxyz,
+                    }
                 return dict(self._mock_prop_poses[prim_name])
             scene_object = self.world.scene.get_object(prim_name)
             target = (
@@ -2607,7 +2647,10 @@ class SimManager:
         if existing is not None:
             return existing  # type: ignore[return-value]
         self._require_prim(prim_path)
-        view = self._isaac.RigidPrim(prim_paths_expr=prim_path, name=f"{_prim_name(name)}_body")
+        # /World/A/hull and /World/B/hull must not share a scene name or a
+        # physics callback, so key both by the whole path
+        key = _body_key(prim_path)
+        view = self._isaac.RigidPrim(prim_paths_expr=prim_path, name=f"{key}_body")
         self.world.scene.add(view)
         if initialize:
             # created while the sim is already running: no world.reset,
@@ -2617,7 +2660,7 @@ class SimManager:
         spawn_position = tuple(float(v) for v in positions[0])
         spawn_orientation = tuple(float(v) for v in orientations[0])
         handle = IsaacBodyHandle(self, name, spec, spawn_position, spawn_orientation, view)
-        self.world.add_physics_callback(f"{_prim_name(name)}_body", handle._on_physics_step)
+        self.world.add_physics_callback(f"{key}_body", handle._on_physics_step)
         self._bodies[name] = handle
         self._bodies[prim_path] = handle
         return handle
@@ -2657,11 +2700,16 @@ class SimManager:
                 )
             return self.run(
                 lambda: self._isaac_body(
-                    str(prim_path).rsplit("/", 1)[-1], str(prim_path), None, initialize=True
+                    _body_key(str(prim_path)), str(prim_path), None, initialize=True
                 ),
                 timeout=60.0,
             )
         raise ValueError(f'{for_resource}: set "prop" (a world prop name) or "prim_path"')
+
+    def remove_handle(self, name: str) -> None:
+        """Forget a component's handle when viam-server closes it, so a
+        renamed or removed resource does not leave a stale entry behind."""
+        self._handles.pop(name, None)
 
     def create_motor(self, name: str, attrs: dict[str, Any]) -> "MotorHandle":
         from .spatial import to_vec3
@@ -2740,6 +2788,12 @@ def _local_ip() -> str:
 def _prim_name(name: str) -> str:
     """Component names may contain characters USD prim names can't."""
     return "".join(c if c.isalnum() or c == "_" else "_" for c in name)
+
+
+def _body_key(prim_path: str) -> str:
+    """A name for a body attached by prim path that is unique per path:
+    /World/A/hull -> World_A_hull."""
+    return _prim_name(prim_path.strip("/").replace("/", "_"))
 
 
 def _import_isaac():

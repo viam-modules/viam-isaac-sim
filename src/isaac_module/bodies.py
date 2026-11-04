@@ -345,7 +345,7 @@ class BodyHandle:
         self._state = BodyState(
             spawn_position, spawn_orientation, (0.0,) * 3, (0.0,) * 3, (0.0,) * 3, 0.0
         )
-        self._prev_velocity: Vec3 = (0.0, 0.0, 0.0)
+        self._prev_velocity: Vec3 | None = None
 
     # --- thrusters ---------------------------------------------------------
 
@@ -387,14 +387,32 @@ class BodyHandle:
         dt: float,
         sim_time_s: float,
     ) -> None:
-        acceleration = (
-            _scale(_sub(linear, self._prev_velocity), 1.0 / dt) if dt > 0.0 else (0.0, 0.0, 0.0)
-        )
-        self._prev_velocity = linear
         with self._lock:
+            if self._prev_velocity is None or dt <= 0.0:
+                # first sample, or the one after a teleport: no history to
+                # differentiate against
+                acceleration: Vec3 = (0.0, 0.0, 0.0)
+            else:
+                acceleration = _scale(_sub(linear, self._prev_velocity), 1.0 / dt)
+            self._prev_velocity = linear
             self._state = BodyState(position, orientation, linear, angular, acceleration, sim_time_s)
             for thruster in self._thrusters.values():
                 thruster.tick(dt)
+
+    def reset_motion(self, position: Vec3, orientation: Quat) -> None:
+        """The body was teleported and its velocities zeroed: publish the new
+        pose at rest and forget the velocity history, so the IMU does not
+        report the jump as one huge acceleration sample."""
+        with self._lock:
+            self._prev_velocity = None
+            self._state = BodyState(
+                position,
+                orientation,
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+                self._state.sim_time_s,
+            )
 
 
 class MockBodyHandle(BodyHandle):
@@ -466,10 +484,7 @@ class MockBodyHandle(BodyHandle):
             self._yaw = yaw
             self._velocity = (0.0, 0.0, 0.0)
             self._yaw_rate = 0.0
-            self._prev_velocity = (0.0, 0.0, 0.0)
-            self._state = BodyState(
-                self._position, quat_from_yaw(yaw), (0.0,) * 3, (0.0,) * 3, (0.0,) * 3, self._time_s
-            )
+        self.reset_motion(self._position, quat_from_yaw(yaw))
 
 
 class MotorHandle:

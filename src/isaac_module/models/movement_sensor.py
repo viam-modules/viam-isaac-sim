@@ -137,3 +137,7 @@ class IsaacMovementSensor(MovementSensor, EasyResource):
 
     async def get_geometries(self, **kwargs):
         return []
+
+    async def close(self) -> None:
+        self._handle = None
+        SimManager.get().remove_handle(self.name)

@@ -221,7 +221,7 @@ def test_floating_cube_prop_gets_a_rigid_body_and_a_physics_callback(fake_pxr):
     assert added[1] is view
     # spawned before the initial world.reset, which initializes the view
     assert view.initialized is False
-    assert "boat_body" in callbacks
+    assert "World_boat_body" in callbacks
     body = manager._bodies["boat"]
     assert manager._bodies["/World/boat"] is body
     assert isinstance(body, IsaacBodyHandle)
@@ -242,7 +242,7 @@ def test_body_for_prim_path_initializes_a_late_view(fake_pxr):
     assert view.initialized is True
     assert body.spec is None
     assert manager.body({"prim_path": "/World/Robot/base_link"}, "motor m") is body
-    assert "base_link_body" in callbacks
+    assert "World_Robot_base_link_body" in callbacks
 
 
 def test_spawn_water_adds_a_translucent_surface_and_a_seabed(fake_pxr):
@@ -261,3 +261,82 @@ def test_spawn_water_adds_a_translucent_surface_and_a_seabed(fake_pxr):
     assert np.array_equal(kwargs["scale"], np.array([100.0, 100.0, 1.0]))
     with pytest.raises(ValueError, match="positive"):
         manager._spawn_water({"size_m": -1})
+
+
+def test_floating_usd_prop_gets_its_mass_and_needs_a_rigid_body(fake_pxr, monkeypatch):
+    import sys
+
+    manager, added, callbacks = _manager(fake_pxr)
+    FakeRigidPrim.instances.clear()
+    applied = {}
+
+    class RigidBodyAPI:
+        pass
+
+    class MassAPI:
+        @staticmethod
+        def Apply(prim):
+            class _Api:
+                def CreateMassAttr(self, value):
+                    applied["mass"] = value
+
+            return _Api()
+
+    sys.modules["pxr"].UsdPhysics = SimpleNamespace(RigidBodyAPI=RigidBodyAPI, MassAPI=MassAPI)
+
+    class RigidPrimPrim(_Prim):
+        def HasAPI(self, api):
+            return api is RigidBodyAPI
+
+    class PlainPrim(_Prim):
+        def HasAPI(self, api):
+            return False
+
+    poses = []
+    manager._isaac.add_reference_to_stage = lambda usd_path, prim_path: None
+    manager._isaac.SingleXFormPrim = lambda path: SimpleNamespace(
+        set_world_pose=lambda **kw: poses.append(kw)
+    )
+    manager._usd_exists = lambda path: True
+    manager._isaac.get_prim_at_path = lambda path: RigidPrimPrim(path)
+
+    manager._spawn_prop(
+        {
+            "name": "skiff",
+            "type": "usd",
+            "usd_path": "/Isaac/skiff.usd",
+            "position": [0, 0, 0.1],
+            "mass": 12,
+            "buoyancy": {"size_m": [2.0, 0.8, 0.4]},
+        }
+    )
+    assert applied["mass"] == 12.0
+    assert FakeRigidPrim.instances[-1].prim_paths_expr == "/World/skiff"
+    assert manager._bodies["skiff"].spec.mass_kg == 12.0
+
+    manager._isaac.get_prim_at_path = lambda path: PlainPrim(path)
+    with pytest.raises(ValueError, match="RigidBodyAPI"):
+        manager._spawn_prop(
+            {
+                "name": "rock",
+                "type": "usd",
+                "usd_path": "/Isaac/rock.usd",
+                "mass": 3,
+                "buoyancy": {"size_m": [1, 1, 1]},
+            }
+        )
+
+
+def test_two_prim_path_bodies_with_the_same_leaf_name_do_not_collide(fake_pxr):
+    manager, added, callbacks = _manager(fake_pxr)
+    manager._booted = SimpleNamespace(is_set=lambda: True)
+    manager._boot_error = None
+    manager.run = lambda fn, timeout=30.0: fn()
+    FakeRigidPrim.instances.clear()
+
+    a = manager.body({"prim_path": "/World/A/hull"}, "motor a")
+    b = manager.body({"prim_path": "/World/B/hull"}, "motor b")
+
+    assert a is not b
+    assert {v.name for v in FakeRigidPrim.instances[-2:]} == {"World_A_hull_body", "World_B_hull_body"}
+    assert {"World_A_hull_body", "World_B_hull_body"} <= set(callbacks)
