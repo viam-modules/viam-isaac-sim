@@ -476,6 +476,9 @@ class SimManager:
         # resources on config change, but prims can't be re-spawned without
         # restarting kit, so handles are cached per component name.
         self._handles: dict[str, tuple[dict[str, Any], Any]] = {}
+        # prim path -> SingleArticulation, so several arm components can each
+        # drive a joint subset of one articulation (e.g. a humanoid)
+        self._arm_articulations: dict[str, Any] = {}
         self._prop_specs: dict[str, dict[str, Any]] = {}
         self._mock_prop_poses: dict[str, dict[str, Any]] = {}
         # rigid bodies that motors push and movement sensors read, keyed by
@@ -1941,6 +1944,17 @@ class SimManager:
 
         usd, meta = self._resolve_usd(attrs)
         prim_path = attrs.get("prim_path") or f"/World/{_prim_name(name)}"
+        shared = self._arm_articulations.get(prim_path)
+        if shared is not None:
+            # Another arm already spawned and reset this articulation. Reuse its
+            # wrapper: re-posing the base or calling world.reset() here would
+            # move the shared robot and reset the sibling arm's joints.
+            if usd:
+                raise ValueError(
+                    f"arm {name!r}: {prim_path} already has an arm attached; "
+                    "set usd_path/asset on only one arm per prim_path"
+                )
+            return self._isaac_arm_handle(name, attrs, meta, shared, prim_path)
         if usd:
             self._isaac.add_reference_to_stage(usd_path=usd, prim_path=prim_path)
             self._require_prim(prim_path)
@@ -1975,34 +1989,50 @@ class SimManager:
         art = self._isaac.SingleArticulation(prim_path=prim_path, name=name)
         self.world.scene.add(art)
         _reset_articulation_at_pose(self.world, art, position, orientation)
+        handle = self._isaac_arm_handle(name, attrs, meta, art, prim_path)
+        self._arm_articulations[prim_path] = art
+        return handle
 
+    def _isaac_arm_handle(
+        self,
+        name: str,
+        attrs: dict[str, Any],
+        meta: dict[str, Any],
+        art: Any,
+        prim_path: str,
+    ) -> "IsaacArmHandle":
         ee = None
         ee_path = attrs.get("end_effector_prim")
         if not ee_path and meta.get("end_effector_link"):
             ee_path = f"{prim_path}/{meta['end_effector_link']}"
         if ee_path:
             ee = self._isaac.SingleXFormPrim(ee_path)
-        return IsaacArmHandle(
-            self,
-            art,
-            ee,
-            prim_path,
-            meta.get("joint_names"),
-            is_moving_velocity_threshold_rad_s=float(
-                attrs.get(
-                    "is_moving_velocity_threshold_rad_s",
-                    DEFAULT_ARM_IS_MOVING_VELOCITY_THRESHOLD_RAD_S,
-                )
-            ),
-            max_joint_deg_s=(
-                float(attrs["max_joint_deg_s"]) if "max_joint_deg_s" in attrs else None
-            ),
-            max_joint_deg_s2=(
-                float(attrs["max_joint_deg_s2"])
-                if "max_joint_deg_s2" in attrs
-                else None
-            ),
-        )
+        try:
+            return IsaacArmHandle(
+                self,
+                art,
+                ee,
+                prim_path,
+                attrs.get("joint_names") or meta.get("joint_names"),
+                is_moving_velocity_threshold_rad_s=float(
+                    attrs.get(
+                        "is_moving_velocity_threshold_rad_s",
+                        DEFAULT_ARM_IS_MOVING_VELOCITY_THRESHOLD_RAD_S,
+                    )
+                ),
+                max_joint_deg_s=(
+                    float(attrs["max_joint_deg_s"])
+                    if "max_joint_deg_s" in attrs
+                    else None
+                ),
+                max_joint_deg_s2=(
+                    float(attrs["max_joint_deg_s2"])
+                    if "max_joint_deg_s2" in attrs
+                    else None
+                ),
+            )
+        except ValueError as exc:
+            raise ValueError(f"arm {name!r}: {exc}") from exc
 
     def create_gripper(self, name: str, attrs: dict[str, Any]) -> "GripperHandle":
         """Attach a supported gripper to an already-created arm articulation."""
@@ -3421,6 +3451,10 @@ class MockArmHandle(ArmHandle):
         dof = int(attrs.get("mock_dof", 6))
         meta = KNOWN_ASSETS.get(str(attrs.get("asset", "")), {})
         configured_names = tuple(meta.get("joint_names", ()))
+        if attrs.get("joint_names"):
+            # like Isaac: an explicit joint subset defines the arm's DOFs
+            configured_names = tuple(attrs["joint_names"])
+            dof = len(configured_names)
         self._joint_names = (
             configured_names
             if len(configured_names) == dof
