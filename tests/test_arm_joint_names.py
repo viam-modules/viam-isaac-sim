@@ -8,7 +8,10 @@ from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
 from isaac_module.models.arm import IsaacArm
-from isaac_module.sim_manager import SimManager
+import numpy as np
+
+from isaac_module import sim_manager
+from isaac_module.sim_manager import SimManager, _merge_position_gains
 
 HUMANOID_DOFS = (
     [f"torso_j{i}" for i in range(1, 4)]
@@ -61,6 +64,7 @@ def _manager():
     manager = object.__new__(SimManager)
     calls = []
     manager._arm_articulations = {}
+    manager._shared_bases = []
     manager.world = SimpleNamespace(
         scene=SimpleNamespace(add=lambda art: calls.append(("add", art.name))),
         reset=lambda: calls.append("reset"),
@@ -123,3 +127,64 @@ def test_only_one_arm_per_prim_may_load_the_usd():
     manager._create_arm_isaac("torso", attrs)
     with pytest.raises(ValueError, match="only one arm per prim_path"):
         manager._create_arm_isaac("head", attrs)
+
+
+WHEELS = ("L_wheel_j2", "R_wheel_j2")
+VEGA_DOFS = list(WHEELS) + list(HUMANOID_DOFS)
+
+
+def test_merge_position_gains_keeps_shape_and_wheels():
+    kps, kds = np.zeros((1, 4)), np.full((1, 4), 300.0)
+    out_kp, out_kd = _merge_position_gains(
+        ["L_wheel_j2", "R_wheel_j2", "torso_j1", "head_j1"],
+        kps,
+        kds,
+        {"torso_j1": (1e4, 300.0), "head_j1": (50.0, 5.0), "not_a_dof": (1.0, 1.0)},
+    )
+    assert out_kp.shape == (1, 4)
+    assert out_kp.tolist() == [[0.0, 0.0, 1e4, 50.0]]
+    assert out_kd.tolist() == [[300.0, 300.0, 300.0, 5.0]]
+    assert kps.tolist() == [[0.0] * 4]  # inputs untouched
+
+
+class _Controller:
+    def __init__(self, n):
+        self.kps, self.kds = np.full((1, n), 7.0), np.full((1, n), 1.0)
+
+    def get_gains(self):
+        return self.kps, self.kds
+
+    def set_gains(self, kps, kds):
+        self.kps, self.kds = np.array(kps), np.array(kds)
+
+    def velocity_mode(self):  # what WheeledRobot.initialize does to the whole articulation
+        self.kps = np.zeros_like(self.kps)
+
+
+def test_base_sharing_articulation_keeps_arm_position_gains(monkeypatch):
+    manager, calls = _manager()
+    controller = _Controller(len(VEGA_DOFS))
+    robot = SimpleNamespace(
+        dof_names=VEGA_DOFS, name="base", get_articulation_controller=lambda: controller
+    )
+    manager.world.reset = lambda: (calls.append("reset"), controller.velocity_mode())
+    manager.world.add_physics_callback = lambda *a: None
+    manager._isaac.WheeledRobot = lambda **kw: robot
+    manager._isaac.DifferentialController = lambda **kw: SimpleNamespace()
+    usd = {name: (1e4, 300.0) for name in HUMANOID_DOFS}
+    monkeypatch.setattr(
+        sim_manager, "_usd_drive_gains", lambda prim, names: {n: usd[n] for n in names}
+    )
+    art = _Art("/World/vega", "torso")
+    art.dof_names = VEGA_DOFS
+    manager._isaac.SingleArticulation = lambda prim_path, name: art
+
+    manager._create_base_isaac("base", {"prim_path": "/World/vega", "wheel_joints": list(WHEELS)})
+    manager._create_arm_isaac(
+        "torso", {"prim_path": "/World/vega", "joint_names": ["torso_j1", "torso_j2", "torso_j3"]}
+    )
+
+    assert calls.count("reset") == 2  # base init and first arm attach both re-zero gains
+    kps = controller.kps.reshape(-1)
+    assert kps[:2].tolist() == [0.0, 0.0]  # wheels stay velocity-controlled
+    assert kps[2:].tolist() == [1e4] * len(HUMANOID_DOFS)
