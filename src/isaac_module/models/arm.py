@@ -10,6 +10,10 @@ Attributes:
   end_effector_prim (string)       - prim path whose world pose GetEndPosition reports;
                                      known assets provide a default when available
   arm_model (string)               - optional episode manifest label for a custom USD
+  joint_names ([string])           - articulation DOFs this arm drives, in order;
+                                     overrides the known asset's joints (default:
+                                     all DOFs). Lets several arms share one
+                                     prim_path, each owning a joint subset.
   move_timeout_sec (float)         - max time to wait for a move (default 30)
   max_joint_deg_s (float)          - optional positive per-joint velocity limit: latched
                                      joint targets ramp at this speed, and it is the
@@ -165,6 +169,25 @@ def _initial_joint_positions_deg(
     return [float(value) for value in raw]
 
 
+def _joint_names(
+    attrs: Mapping[str, Any], component_name: str
+) -> list[str] | None:
+    raw = attrs.get("joint_names")
+    if raw is None:
+        return None
+    if (
+        not isinstance(raw, (list, tuple))
+        or not raw
+        or not all(isinstance(name, str) and name for name in raw)
+    ):
+        raise ValueError(
+            f"{component_name}: joint_names must be a non-empty list of strings"
+        )
+    if len(set(raw)) != len(raw):
+        raise ValueError(f"{component_name}: joint_names must be unique")
+    return list(raw)
+
+
 def _is_moving_velocity_threshold(
     attrs: Mapping[str, Any], component_name: str
 ) -> float:
@@ -217,6 +240,7 @@ class IsaacArm(Arm, EasyResource):
         _max_joint_deg_s(attrs, config.name)
         _max_joint_deg_s2(attrs, config.name)
         _initial_joint_positions_deg(attrs, config.name)
+        _joint_names(attrs, config.name)
         return result
 
     def reconfigure(
@@ -271,7 +295,9 @@ class IsaacArm(Arm, EasyResource):
         return {
             "simulation": True,
             "arm_model": model,
-            "joint_names": list(meta.get("joint_names", ())),
+            "joint_names": list(
+                self._attrs.get("joint_names") or meta.get("joint_names", ())
+            ),
         }
 
     async def get_end_position(self, **kwargs) -> Pose:
@@ -560,8 +586,9 @@ class IsaacArm(Arm, EasyResource):
             return await asyncio.to_thread(self._h().dynamics_metadata)
         if cmd == "set_joint_targets_radians":
             raw = command.get("values")
-            if not isinstance(raw, (list, tuple)) or len(raw) != 6:
-                raise ValueError("set_joint_targets_radians requires six values")
+            dof = len(self._h().joint_names())
+            if not isinstance(raw, (list, tuple)) or len(raw) != dof:
+                raise ValueError(f"set_joint_targets_radians requires {dof} values")
             targets = [float(value) for value in cast(Any, raw)]
             if not all(math.isfinite(value) for value in targets):
                 raise ValueError("set_joint_targets_radians values must be finite")

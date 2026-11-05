@@ -248,6 +248,34 @@ NVIDIA's integrated gripper variant and defaults to its gripper body.
 `initial_joint_positions_deg` (known assets, in their joint order) spawns the
 arm at that pose instead of zero joints, and a world `reset` returns it there.
 
+`joint_names` (optional, non-empty list of unique strings) names the
+articulation DOFs this arm drives, in order. It overrides a known asset's
+joints; without it a custom `usd_path`/`prim_path` arm drives every DOF. Names
+missing from the articulation fail at startup with an error naming the arm.
+Several arms can split one articulation, such as a humanoid's torso, head, and
+two arms: one arm loads the USD, and the others attach to the same `prim_path`
+with no `usd_path`/`asset`. The attaching arms reuse the first arm's
+articulation, so they don't move its base or reset the scene, and their
+`position` is ignored. Each attaching arm needs the loading arm in its
+`depends_on`, so the USD is in the stage before it attaches:
+
+```json
+{"name": "torso", "api": "rdk:component:arm", "model": "viam-labs:isaac-sim:arm",
+ "attributes": {"world": "sim-world", "usd_path": "/robots/vega.usd",
+   "prim_path": "/World/vega", "joint_names": ["torso_j1", "torso_j2", "torso_j3"]}},
+{"name": "left_arm", "api": "rdk:component:arm", "model": "viam-labs:isaac-sim:arm",
+ "depends_on": ["torso"],
+ "attributes": {"world": "sim-world", "prim_path": "/World/vega",
+   "joint_names": ["L_arm_j1", "L_arm_j2", "L_arm_j3", "L_arm_j4",
+                   "L_arm_j5", "L_arm_j6", "L_arm_j7"]}}
+```
+
+Multi-arm articulations are verified only in mock mode and against stand-ins
+for the Isaac API, not in a running Isaac Sim. Unverified: that partial
+`ArticulationAction`s from sibling arms on one articulation leave each other's
+joint targets alone, and how a gripper attached to one of the arms (which calls
+`world.reset()`) affects the others.
+
 `MoveToJointPositions`, `MoveThroughJointPositions`, and
 `MoveThroughJointPositionsStreamed` work today. Streamed trajectories use their
 timestamps as simulator time: a physics callback applies each complete
@@ -264,8 +292,8 @@ for the simulated arm. Module-level `MoveToPosition` still raises - use the
 motion service.
 
 For timestamped controllers, arm `DoCommand` accepts
-`{"command":"set_joint_targets_radians","values":[q0,...,q5]}`. It validates
-six finite radians targets, latches them, and returns immediately without waiting
+`{"command":"set_joint_targets_radians","values":[q0,...,qN]}`. It validates
+one finite radians target per arm joint, latches them, and returns immediately without waiting
 for waypoint settlement. `get_joint_positions_radians` returns the matching
 radian state used by policy clients.
 
