@@ -631,6 +631,30 @@ def _usd_drive_gains(root_prim: Any, names: set[str]) -> dict[str, tuple[float, 
     return gains
 
 
+def _pin_link_to_world(
+    stage: Any,
+    link_path: str,
+    position: Sequence[float],
+    orientation_wxyz: Sequence[float] | None,
+) -> None:
+    """Fix a floating articulation's root link to the world at its spawn pose.
+
+    Some mobile-manipulator USDs (e.g. Isaac's RidgebackFranka) drive the base
+    through virtual x/y/yaw joints hanging off a dynamic root link. Without an
+    anchor that root recoils instead of the chassis moving."""
+    from pxr import Gf, Sdf, UsdPhysics
+
+    if not stage.GetPrimAtPath(link_path).IsValid():
+        raise ValueError(f"fixed_base_link: no prim at {link_path}")
+    w, x, y, z = orientation_wxyz if orientation_wxyz is not None else (1.0, 0.0, 0.0, 0.0)
+    joint = UsdPhysics.FixedJoint.Define(stage, f"{link_path}_viam_fixed_base")
+    joint.CreateBody1Rel().SetTargets([Sdf.Path(link_path)])  # body0 unset = world
+    joint.CreateLocalPos0Attr(Gf.Vec3f(*[float(v) for v in position]))
+    joint.CreateLocalRot0Attr(Gf.Quatf(float(w), Gf.Vec3f(float(x), float(y), float(z))))
+    joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
+    joint.CreateLocalRot1Attr(Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0)))
+
+
 def _reset_articulation_at_pose(
     reset: Callable[[], None],
     articulation: Any,
@@ -2618,6 +2642,13 @@ class SimManager:
             self._isaac.SingleXFormPrim(prim_path).set_world_pose(**pose_kwargs)
         except Exception:
             LOGGER.exception("failed to set base pose for %s", name)
+        if attrs.get("fixed_base_link"):
+            _pin_link_to_world(
+                self._isaac.get_prim_at_path(prim_path).GetStage(),
+                f"{prim_path}/{attrs['fixed_base_link']}",
+                position,
+                orientation,
+            )
 
         art = self._isaac.SingleArticulation(prim_path=prim_path, name=name)
         self.world.scene.add(art)
