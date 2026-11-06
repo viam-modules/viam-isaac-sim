@@ -1,4 +1,4 @@
-"""viam-labs:isaac-sim:base - a simulated differential-drive base.
+"""viam-labs:isaac-sim:base - a simulated differential-drive or holonomic base.
 
 Attributes:
   world (string, required)     - name of the viam-labs:isaac-sim:world component
@@ -21,6 +21,10 @@ Attributes:
                                  (0.03), thickness_m (0.002)}]
   chassis_link (string)        - link the markers ride on, under prim_path
                                  (the asset's, e.g. "chassis" for jetbot)
+  planar_joints ([x, y, yaw])  - holonomic mode: drive these joints of the
+                                 articulation an arm on prim_path loads (e.g.
+                                 RidgebackFranka's dummy_base_* joints) instead of
+                                 wheels; linear.x strafes. Add that arm to depends_on.
 """
 
 import asyncio
@@ -111,12 +115,16 @@ class IsaacBase(Base, EasyResource):
     async def set_power(self, linear: Vector3, angular: Vector3, **kwargs) -> None:
         lin = max(-1.0, min(1.0, linear.y)) * self._max_linear
         ang = max(-1.0, min(1.0, angular.z)) * self._max_angular
-        await asyncio.to_thread(self._h().set_velocity, lin, ang)
+        left = -max(-1.0, min(1.0, linear.x)) * self._max_linear  # viam +x is right
+        await asyncio.to_thread(self._h().set_velocity, lin, ang, left)
 
     async def set_velocity(self, linear: Vector3, angular: Vector3, **kwargs) -> None:
         # viam: linear mm/s, angular deg/s -> isaac: m/s, rad/s
         await asyncio.to_thread(
-            self._h().set_velocity, linear.y / 1000.0, math.radians(angular.z)
+            self._h().set_velocity,
+            linear.y / 1000.0,
+            math.radians(angular.z),
+            -linear.x / 1000.0,  # viam +x is right
         )
 
     async def stop(self, **kwargs) -> None:
