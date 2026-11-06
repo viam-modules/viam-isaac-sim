@@ -9,13 +9,7 @@
   import { Badge, Button } from '@viamrobotics/prime-core';
   import { untrack } from 'svelte';
 
-  import {
-    RECORDING_ERROR,
-    toView,
-    type View,
-    type ViewPatch,
-    type ViewReply,
-  } from './lib/contract';
+  import { RECORDING_ERROR, toView, type View, type ViewReply } from './lib/contract';
   import { KEY_ORBIT_DEG, ORBIT_DEG_PER_PX, ZOOM_STEP, orbit, pan, zoom } from './lib/orbit';
   import { createSender } from './lib/sender';
 
@@ -49,7 +43,15 @@
     return error instanceof Error ? error.message : String(error);
   }
 
-  function fail(error: unknown) {
+  // the request never reached the machine (or its answer was lost): not a verdict on the view
+  const TRANSPORT_ERRORS = new Set(['not-connected', 'disconnected', 'timeout']);
+  const isTransportError = (error: unknown) =>
+    TRANSPORT_ERRORS.has(String((error as { kind?: unknown } | null)?.kind));
+
+  /** Returns true when the request should be retried rather than rolled back. */
+  function fail(error: unknown): boolean {
+    // keep what the user sees; the sender resends it once the bridge is back
+    if (isTransportError(error)) return true;
     const message = messageOf(error);
     if (message.includes(RECORDING_ERROR)) {
       lockedByError = true;
@@ -58,14 +60,16 @@
       errorMessage = message;
     }
     if (lastReply) local = toView(lastReply);
+    return false;
   }
 
   async function run(cmd: object): Promise<ViewReply> {
     return (await command.mutateAsync([cmd as Record<string, JsonValue>])) as unknown as ViewReply;
   }
 
-  const sender = createSender<ViewPatch, ViewReply>(
-    (patch) => run({ command: 'set_view', ...patch }),
+  // always the whole view: set_view is absolute, so any later success heals a lost request
+  const sender = createSender<View, ViewReply>(
+    (view) => run({ command: 'set_view', ...view }),
     (reply) => {
       errorMessage = undefined;
       adopt(reply);
@@ -95,9 +99,9 @@
     });
   });
 
-  // a queued patch would be stale after a reconnect
+  // resend the latest view a dropped connection held back
   $effect(() => {
-    if (bridge.status !== 'connected') sender.drop();
+    if (bridge.status === 'connected') sender.resume();
   });
 
   // frames: swap object URLs, revoking the old one; keep the last frame on errors
@@ -123,10 +127,10 @@
     if (homeButton) homeButton.disabled = recording;
   });
 
-  function update(next: View, patch: ViewPatch) {
+  function update(next: View) {
     lastLocalChange = performance.now();
     local = next;
-    sender.push(patch);
+    sender.push(next);
   }
 
   async function goHome() {
@@ -171,20 +175,20 @@
       const now = spread();
       if (pinchDistance > 0 && now > 0) {
         const next = zoom(local, pinchDistance / now);
-        update(next, { distance: next.distance });
+        update(next);
       }
       pinchDistance = now;
       // two fingers moving together also pan, at half rate per finger
       const next = pan(local, dx / 2, dy / 2);
-      update(next, { target: next.target });
+      update(next);
       return;
     }
     if (event.shiftKey) {
       const next = pan(local, dx, dy);
-      update(next, { target: next.target });
+      update(next);
     } else {
       const next = orbit(local, dx, dy);
-      update(next, { yaw_deg: next.yaw_deg, pitch_deg: next.pitch_deg });
+      update(next);
     }
   }
 
@@ -200,7 +204,7 @@
     if (recording || !local || event.deltaY === 0) return;
     // ~100 px per mouse notch; trackpads send many small deltas and scale down to match
     const next = zoom(local, ZOOM_STEP ** (event.deltaY / 100));
-    update(next, { distance: next.distance });
+    update(next);
   }
 
   function onKeyDown(event: KeyboardEvent) {
@@ -222,11 +226,7 @@
     else if (key === '-' || key === '_') next = zoom(local, ZOOM_STEP);
     if (!next) return;
     event.preventDefault();
-    update(next, {
-      yaw_deg: next.yaw_deg,
-      pitch_deg: next.pitch_deg,
-      distance: next.distance,
-    });
+    update(next);
   }
 
   let fovDraft = $state<number | undefined>();
@@ -234,7 +234,7 @@
 
   function commitFov() {
     if (fovDraft === undefined || !local) return;
-    update({ ...local, fov_deg: fovDraft }, { fov_deg: fovDraft });
+    update({ ...local, fov_deg: fovDraft });
     fovDraft = undefined;
   }
 

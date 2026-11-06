@@ -14,6 +14,42 @@ function deferred<T>() {
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+describe('createSender retry', () => {
+  it('keeps a patch after a retryable error and resends it on resume', async () => {
+    const send = vi.fn().mockRejectedValueOnce(new Error('lost')).mockResolvedValueOnce('ok');
+    const onReply = vi.fn();
+    const sender = createSender(send, onReply, () => true);
+    sender.push({ a: 1 });
+    await flush();
+    expect(send).toHaveBeenCalledTimes(1); // no tight retry loop
+    expect(sender.busy).toBe(true);
+    sender.resume();
+    await flush();
+    expect(send).toHaveBeenLastCalledWith({ a: 1 });
+    expect(onReply).toHaveBeenCalledWith('ok');
+    expect(sender.busy).toBe(false);
+  });
+
+  it('a newer push replaces the stalled patch and sends at once', async () => {
+    const send = vi.fn().mockRejectedValueOnce(new Error('lost')).mockResolvedValueOnce('ok');
+    const sender = createSender(send, vi.fn(), () => true);
+    sender.push({ a: 1 });
+    await flush();
+    sender.push({ a: 2 });
+    await flush();
+    expect(send).toHaveBeenLastCalledWith({ a: 2 });
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not keep a patch the error handler declines to retry', async () => {
+    const send = vi.fn().mockRejectedValueOnce(new Error('rejected'));
+    const sender = createSender(send, vi.fn(), () => false);
+    sender.push({ a: 1 });
+    await flush();
+    expect(sender.busy).toBe(false);
+  });
+});
+
 describe('createSender', () => {
   it('keeps one request in flight and sends only the newest merged patch next', async () => {
     const calls: Record<string, number>[] = [];
