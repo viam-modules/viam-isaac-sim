@@ -60,3 +60,24 @@ def test_planar_base_needs_the_arm_that_loaded_its_articulation():
         manager._create_planar_base_isaac(
             "b2", {"prim_path": "/World/robot", "planar_joints": RIDGEBACK[:2]}
         )
+
+
+def test_bounded_drive_stops_after_its_sim_time_budget():
+    import numpy as np
+
+    from isaac_module.sim_manager import PlanarJointBaseHandle
+
+    applied = []
+    art = SimpleNamespace(
+        get_joint_positions=lambda joint_indices: np.zeros(3),
+        apply_action=lambda action: applied.append(list(action["joint_positions"])),
+    )
+    sim = SimpleNamespace(_isaac=SimpleNamespace(ArticulationAction=lambda **kw: kw))
+    handle = PlanarJointBaseHandle(sim, art, [0, 1, 2])
+
+    handle.drive_for(0.5, 0.0, duration_s=1.0)  # 0.5 m forward
+    while handle.is_moving():
+        handle._on_physics_step(1 / 60 * 7)  # coarse steps overshoot the budget
+    assert applied[-1][0] == pytest.approx(0.5)  # last step clipped to the budget
+    handle._on_physics_step(1 / 60)
+    assert len(applied) == 9  # nothing applied once stopped

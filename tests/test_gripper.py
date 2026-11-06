@@ -910,3 +910,44 @@ def test_independent_fingers_are_all_driven():
     assert handle._drive_indices == [7, 8]
     assert controller.kps[7:].tolist() == [2000.0, 2000.0]  # tamed, not the USD's 1e7
     assert controller.kps[:7].tolist() == [1e7] * 7  # arm joints untouched
+
+
+def test_stop_keeps_a_settled_grip():
+    # viam-server stops the gripper when the session that sent Grab ends
+    state = {"q": 0.04, "t": 0.0}
+
+    class Controller:
+        def get_gains(self):
+            return np.ones(2), np.ones(2)
+
+        def set_gains(self, kps, kds):
+            pass
+
+    class World:
+        current_time = property(lambda self: state["t"])
+
+    art = SimpleNamespace(
+        dof_names=["f1", "f2"],
+        get_articulation_controller=Controller,
+        get_joint_positions=lambda joint_indices: np.full(len(joint_indices), state["q"]),
+        apply_action=lambda action: None,
+    )
+    sim = SimpleNamespace(
+        run=lambda fn: fn(),
+        mock=False,
+        world=World(),
+        _isaac=SimpleNamespace(ArticulationAction=lambda **kw: kw),
+    )
+    handle = IsaacGripperHandle(
+        sim, art, "f1", 0.04, 0.0, 0.001, position_unit="m",
+        coupled_drive_joints=("f2",), drive_coupled=True,
+    )
+    handle.close()
+    for q in (0.03, 0.025, 0.025, 0.025, 0.025):  # closes onto a 50 mm cube, stalls
+        state["q"], state["t"] = q, state["t"] + 0.1
+        handle.is_moving()
+    assert handle.is_holding()
+
+    handle.stop()
+    assert handle.is_holding()
+    assert handle._target == 0.0  # still squeezing toward closed

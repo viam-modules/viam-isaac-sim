@@ -91,12 +91,7 @@ class IsaacBase(Base, EasyResource):
         speed = abs(velocity) / 1000.0
         direction = 1.0 if (meters >= 0) == (velocity >= 0) else -1.0
         duration = abs(meters) / speed
-        handle = self._h()
-        await asyncio.to_thread(handle.set_velocity, direction * speed, 0.0)
-        try:
-            await asyncio.sleep(duration)
-        finally:
-            await asyncio.to_thread(handle.stop)
+        await self._drive(direction * speed, 0.0, duration)
 
     async def spin(self, angle: float, velocity: float, **kwargs) -> None:
         if velocity == 0:
@@ -105,10 +100,18 @@ class IsaacBase(Base, EasyResource):
         speed = math.radians(abs(velocity))
         direction = 1.0 if (radians >= 0) == (velocity >= 0) else -1.0
         duration = abs(radians) / speed
+        await self._drive(0.0, direction * speed, duration)
+
+    async def _drive(self, linear: float, angular: float, duration: float) -> None:
         handle = self._h()
-        await asyncio.to_thread(handle.set_velocity, 0.0, direction * speed)
         try:
-            await asyncio.sleep(duration)
+            if hasattr(handle, "drive_for"):  # bounded in sim time: exact distance
+                await asyncio.to_thread(handle.drive_for, linear, angular, duration)
+                while await asyncio.to_thread(handle.is_moving):
+                    await asyncio.sleep(0.02)
+            else:  # ponytail: wall-clock timing drifts when the sim runs off real time
+                await asyncio.to_thread(handle.set_velocity, linear, angular)
+                await asyncio.sleep(duration)
         finally:
             await asyncio.to_thread(handle.stop)
 

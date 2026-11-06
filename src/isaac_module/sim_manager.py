@@ -4906,6 +4906,11 @@ class IsaacGripperHandle(GripperHandle):
             self._start_effort_close()
 
     def stop(self) -> None:
+        # viam-server calls Stop when the session that sent Grab ends; a settled
+        # grip has nothing to stop, and re-targeting the jaw where it stalled
+        # would drop both the squeeze and the holding latch.
+        if self.is_holding():
+            return
         self.set_jaw(self.get_jaw())
 
     def _sim_time(self) -> float:
@@ -5301,6 +5306,7 @@ class PlanarJointBaseHandle(BaseHandle):
         self._art = articulation
         self._indices = indices
         self._cmd = (0.0, 0.0, 0.0)  # forward m/s, yaw rad/s, left m/s
+        self._remaining_s: float | None = None  # sim-time budget of a bounded move
         self._target: list[float] | None = None
         self._lock = threading.Lock()
 
@@ -5309,7 +5315,12 @@ class PlanarJointBaseHandle(BaseHandle):
 
         with self._lock:
             forward, yaw_rate, left = self._cmd
-        if (forward, yaw_rate, left) == (0.0, 0.0, 0.0):
+            if self._remaining_s is not None:
+                step_size = min(step_size, self._remaining_s)
+                self._remaining_s -= step_size
+                if self._remaining_s <= 0.0:
+                    self._cmd, self._remaining_s = (0.0, 0.0, 0.0), None
+        if (forward, yaw_rate, left) == (0.0, 0.0, 0.0) or step_size <= 0.0:
             self._target = None
             return
         try:
@@ -5333,6 +5344,16 @@ class PlanarJointBaseHandle(BaseHandle):
     ) -> None:
         with self._lock:
             self._cmd = (float(linear_mps), float(angular_rps), float(left_mps))
+            self._remaining_s = None
+
+    def drive_for(
+        self, linear_mps: float, angular_rps: float, duration_s: float, left_mps: float = 0.0
+    ) -> None:
+        """Hold a velocity for exactly duration_s of simulator time, so
+        MoveStraight/Spin land on target however fast the sim runs."""
+        with self._lock:
+            self._cmd = (float(linear_mps), float(angular_rps), float(left_mps))
+            self._remaining_s = float(duration_s)
 
     def stop(self) -> None:
         self.set_velocity(0.0, 0.0)
