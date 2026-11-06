@@ -15,6 +15,11 @@
       "short_description": "A simulated arm (UR, Franka, or any articulation USD)"
     },
     {
+      "model": "viam-labs:isaac-sim:ufactory-xarm6",
+      "api": "rdk:component:arm",
+      "short_description": "A simulated UFactory xArm 6 that takes the viam:ufactory:xArm6 config"
+    },
+    {
       "model": "viam-labs:isaac-sim:camera",
       "api": "rdk:component:camera",
       "short_description": "A simulated RGB camera in the Isaac Sim stage"

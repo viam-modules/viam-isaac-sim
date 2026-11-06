@@ -22,11 +22,12 @@ What it is/does
 |---|---|---|
 | `viam-labs:isaac-sim:world` | `generic` | Boots Isaac Sim, opens the USD stage, runs the sim loop. Configure exactly one. |
 | `viam-labs:isaac-sim:arm` | `arm` | Spawns (or attaches to) an articulation - UR arms, Franka, or any USD - and exposes joint control. |
+| `viam-labs:isaac-sim:ufactory-xarm6` | `arm` | A UFactory xArm 6 that takes the same config as `viam:ufactory:xArm6`. |
 | `viam-labs:isaac-sim:gripper` | `gripper` | Exposes a supported parallel gripper, including the Lite 6's integrated gripper. |
 | `viam-labs:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves its RGB frames. |
 | `viam-labs:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
 
-Known robot assets (usable via the `asset` attribute): `lite6`, `ur3e`, `ur5e`,
+Known robot assets (usable via the `asset` attribute): `lite6`, `xarm6`, `ur3e`, `ur5e`,
 `ur10`, `ur10e`, `ur16e`, `ur20`, `franka`, and `jetbot`. Known grippers
 are `lite6_gripper` and `robotiq_2f_85`. The Lite 6 assets require Isaac Sim
 5.0 or newer. Anything else can be loaded with `usd_path`, or attached to prims
@@ -245,6 +246,25 @@ For timestamped controllers, arm `DoCommand` accepts
 six finite radians targets, latches them, and returns immediately without waiting
 for waypoint settlement. `get_joint_positions_radians` returns the matching
 radian state used by policy clients.
+
+### ufactory-xarm6 attributes
+
+Takes the attributes of `viam:ufactory:xArm6`, so a real xArm 6 config runs
+unchanged, plus the `world` attribute. When Viam simulates a machine it swaps
+`viam:ufactory:xArm6` for this model and adds `"world": "sim-world"` for you.
+
+| Attribute | Default | Notes |
+|---|---|---|
+| `world` | (required) | Name of the world component. |
+| `speed_degs_per_sec` | `60` | Max joint speed, `0.25`-`180`, as on the real arm. |
+| `acceleration_degs_per_sec_per_sec` | `381.67` | Max joint acceleration, up to `1145`. |
+| `move_hz` | `100` | Rate trajectories are streamed at, `20`-`1000`. |
+| `motion` | `builtin` | Motion service `MoveToPosition` plans with. |
+
+Connection and hardware-only attributes (`host`, `port`,
+`ufactory-studio-proxy`, `collision_sensitivity`, `bad-joints`, ...) are
+accepted and ignored. Only the six arm joints are driven; the USD's gripper
+joints are left alone.
 
 ### gripper attributes
 

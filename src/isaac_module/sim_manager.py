@@ -43,6 +43,7 @@ UR_JOINT_NAMES = (
     "wrist_3_joint",
 )
 LITE6_JOINT_NAMES = tuple(f"joint{index}" for index in range(1, 7))
+XARM6_JOINT_NAMES = tuple(f"joint{index}" for index in range(1, 7))
 LITE6_JAW_LAYOUTS: dict[str, tuple[float, float]] = {
     "narrow": (-1.0, 1.0),
     "middle_positive_y": (1.0, 1.0),
@@ -124,6 +125,14 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         "joint_names": LITE6_JOINT_NAMES,
         "end_effector_link": "gripper/uflite_gripper_link",
         "variants": {"Variant_Set": "lite_gripper"},
+    },
+    "xarm6": {
+        "usd": ["/Isaac/Robots/Ufactory/xarm6/xarm6.usd"],
+        "kinematics": f"{_UFACTORY_KINEMATICS}/xarm6_kinematics.json",
+        "joint_names": XARM6_JOINT_NAMES,
+        # the flange link, found by name since its path inside the USD isn't fixed;
+        # it is where the kinematics file's end frame sits
+        "end_effector_link_name": "link6",
     },
     "franka": {
         "usd": [
@@ -1844,6 +1853,17 @@ class SimManager:
         ee_path = attrs.get("end_effector_prim")
         if not ee_path and meta.get("end_effector_link"):
             ee_path = f"{prim_path}/{meta['end_effector_link']}"
+        if not ee_path and meta.get("end_effector_link_name"):
+            ee_path = self._find_descendant_prim(
+                prim_path, meta["end_effector_link_name"]
+            )
+            if ee_path is None:
+                LOGGER.warning(
+                    "%s: no %r prim under %s; GetEndPosition will be unavailable",
+                    name,
+                    meta["end_effector_link_name"],
+                    prim_path,
+                )
         if ee_path:
             ee = self._isaac.SingleXFormPrim(ee_path)
         return IsaacArmHandle(
@@ -1867,6 +1887,14 @@ class SimManager:
                 else None
             ),
         )
+
+    def _find_descendant_prim(self, root_path: str, prim_name: str) -> str | None:
+        from pxr import Usd
+
+        for prim in Usd.PrimRange(self._isaac.get_prim_at_path(root_path)):
+            if prim.GetName() == prim_name:
+                return str(prim.GetPath())
+        return None
 
     def create_gripper(self, name: str, attrs: dict[str, Any]) -> "GripperHandle":
         """Attach a supported gripper to an already-created arm articulation."""

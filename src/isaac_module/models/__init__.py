@@ -1,1 +1,1 @@
-from . import world, arm, camera, base, gripper
+from . import world, arm, camera, base, gripper, ufactory_xarm
