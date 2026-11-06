@@ -7,7 +7,10 @@
   <link name="world_link"/>
   <link name="dummy_base_x"/>
   <link name="dummy_base_y"/>
-  <link name="base_link"/>
+  <link name="base_link">
+    <!-- chassis, 0.96 x 0.79 m footprint, top 1 cm under the Franka mount -->
+    <collision><origin xyz="0 0 0.145" rpy="0 0 0"/><geometry><box size="0.96 0.79 0.25"/></geometry></collision>
+  </link>
 
   <joint name="dummy_base_prismatic_x_joint" type="prismatic">
     <parent link="world_link"/><child link="dummy_base_x"/>
