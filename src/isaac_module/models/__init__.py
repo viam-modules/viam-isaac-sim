@@ -1,1 +1,1 @@
-from . import world, arm, camera, base, gripper, motor, movement_sensor
+from . import world, arm, camera, base, gripper, lidar, motor, movement_sensor
