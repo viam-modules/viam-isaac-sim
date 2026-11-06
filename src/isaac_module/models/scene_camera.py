@@ -74,6 +74,14 @@ def _clamp_view(view: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _is_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
+
+
 def _parse_patch(patch: Mapping[str, Any]) -> Dict[str, Any]:
     unknown = sorted(set(patch) - set(VIEW_KEYS))
     if unknown:
@@ -83,12 +91,15 @@ def _parse_patch(patch: Mapping[str, Any]) -> Dict[str, Any]:
     parsed: Dict[str, Any] = {}
     for key, value in patch.items():
         if key == "target":
-            try:
-                parsed[key] = list(to_vec3(value))
-            except (TypeError, ValueError) as error:
-                raise ValueError("set_view: target must be [x, y, z]") from error
+            if (
+                not isinstance(value, (list, tuple))
+                or len(value) != 3
+                or not all(_is_number(v) for v in value)
+            ):
+                raise ValueError("set_view: target must be [x, y, z]")
+            parsed[key] = [float(v) for v in value]
             continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        if not _is_number(value):
             raise ValueError(f"set_view: {key} must be a finite number")
         parsed[key] = float(value)
     return parsed
@@ -149,7 +160,7 @@ class IsaacSceneCamera(IsaacCamera):
                 f"keep it within {MAX_PITCH_DEG:.0f} deg so it can orbit"
             )
         fov = attrs.get("fov_deg", DEFAULT_FOV_DEG)
-        if not isinstance(fov, (int, float)) or not 1.0 <= float(fov) <= 179.0:
+        if isinstance(fov, bool) or not isinstance(fov, (int, float)) or not 1.0 <= float(fov) <= 179.0:
             raise ValueError(f"{name}: fov_deg must be between 1 and 179")
         return validate_sim_component(config, needs_source=False)
 
@@ -187,12 +198,16 @@ class IsaacSceneCamera(IsaacCamera):
             "target": list(view["target"]),
             "fov_deg": view["fov_deg"],
         }
+        # if SimManager.run times out the queued update still runs later, so
+        # _handles can briefly disagree with _view until the next set_view (accepted)
         self._handle = SimManager.get().create_camera(self.name, attrs)
 
     def get_view(self) -> Dict[str, Any]:
-        with self._lock:
-            view = {**self._view, "target": list(self._view["target"])}
-            home = {**self._home, "target": list(self._home["target"])}
+        # lock-free: _view/_home are only ever replaced whole, never mutated,
+        # so a poll never waits behind a slow set_view
+        view, home = self._view, self._home
+        view = {**view, "target": list(view["target"])}
+        home = {**home, "target": list(home["target"])}
         return {**view, "home": home, "recording": SimManager.get().episode_active}
 
     def set_view(self, patch: Mapping[str, Any]) -> Dict[str, Any]:

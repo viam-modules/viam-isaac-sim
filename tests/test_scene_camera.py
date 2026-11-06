@@ -85,6 +85,11 @@ def test_validate_rejects_rotated_frame():
         IsaacSceneCamera.validate_config(config)
 
 
+def test_validate_rejects_bool_fov():
+    with pytest.raises(ValueError, match="fov_deg"):
+        IsaacSceneCamera.validate_config(_config("c", {"world": "sim-world", "fov_deg": True}))
+
+
 def test_validate_rejects_position_with_frame():
     config = _config("c", {"world": "sim-world", "position": [1, 2, 3]})
     config.frame.parent = "world"
@@ -167,6 +172,9 @@ def test_set_view_target_and_fov(manager):
         ({"distance": "far"}, "distance must be a finite number"),
         ({"yaw_deg": True}, "yaw_deg must be a finite number"),
         ({"target": [1, 2]}, "target must be"),
+        ({"target": None}, "target must be"),
+        ({"target": "123"}, "target must be"),
+        ({"target": [0, 0, float("nan")]}, "target must be"),
     ],
 )
 def test_set_view_rejects_bad_input(manager, patch, match):
