@@ -10,6 +10,9 @@ Attributes:
   end_effector_prim (string)       - prim path whose world pose GetEndPosition reports;
                                      known assets provide a default when available
   arm_model (string)               - optional episode manifest label for a custom USD
+  fixed_base_link (string)         - link under prim_path to fix to the world at the
+                                     spawn pose, for floating-root USDs whose base
+                                     moves through virtual joints (RidgebackFranka: "world")
   joint_names ([string])           - articulation DOFs this arm drives, in order;
                                      overrides the known asset's joints (default:
                                      all DOFs). Lets several arms share one

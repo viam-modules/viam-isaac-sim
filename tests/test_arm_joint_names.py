@@ -205,3 +205,23 @@ def test_base_sharing_articulation_keeps_arm_position_gains(monkeypatch):
     kps = controller.kps.reshape(-1)
     assert kps[:2].tolist() == [0.0, 0.0]  # wheels stay velocity-controlled
     assert kps[2:].tolist() == [1e4] * len(HUMANOID_DOFS)
+
+
+def test_pin_link_to_world_fixes_root_at_spawn_pose():
+    pytest.importorskip("pxr")
+    from pxr import Sdf, Usd, UsdGeom, UsdPhysics
+    pxr = SimpleNamespace(Sdf=Sdf, Usd=Usd, UsdGeom=UsdGeom, UsdPhysics=UsdPhysics)
+    stage = pxr.Usd.Stage.CreateInMemory()
+    pxr.UsdGeom.Xform.Define(stage, "/World/robot/world")
+
+    sim_manager._pin_link_to_world(
+        stage, "/World/robot/world", (1.0, 2.0, 0.0), (0.0, 0.0, 0.0, 1.0)
+    )
+
+    joint = pxr.UsdPhysics.FixedJoint(stage.GetPrimAtPath("/World/robot/world_viam_fixed_base"))
+    assert joint.GetBody0Rel().GetTargets() == []  # world
+    assert joint.GetBody1Rel().GetTargets() == [pxr.Sdf.Path("/World/robot/world")]
+    assert tuple(joint.GetLocalPos0Attr().Get()) == (1.0, 2.0, 0.0)
+    assert joint.GetLocalRot0Attr().Get().GetReal() == 0.0
+    with pytest.raises(ValueError, match="no prim"):
+        sim_manager._pin_link_to_world(stage, "/World/robot/nope", (0, 0, 0), None)
