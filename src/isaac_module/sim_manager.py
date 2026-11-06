@@ -2073,6 +2073,10 @@ class SimManager:
         except Exception:
             LOGGER.exception("failed to set base pose for %s", name)
         if attrs.get("fixed_base_link"):
+            # PhysX decides fixed vs floating base when it builds the articulation
+            # on play; a joint authored while playing becomes a loose constraint
+            # that the root slides against. Stop first; the reset below re-plays.
+            self.world.stop()
             _pin_link_to_world(
                 self._isaac.get_prim_at_path(prim_path).GetStage(),
                 f"{prim_path}/{attrs['fixed_base_link']}",
@@ -2083,6 +2087,15 @@ class SimManager:
         art = self._isaac.SingleArticulation(prim_path=prim_path, name=name)
         self.world.scene.add(art)
         _reset_articulation_at_pose(self.world, art, position, orientation)
+        if attrs.get("fixed_base_link"):
+            view = getattr(getattr(art, "_articulation_view", None), "_physics_view", None)
+            LOGGER.info(
+                "arm %s: pinned %s/%s to the world; physx fixed_base=%s",
+                name,
+                prim_path,
+                attrs["fixed_base_link"],
+                getattr(getattr(view, "shared_metatype", None), "fixed_base", "unknown"),
+            )
         self._restore_shared_base_gains()
         handle = self._isaac_arm_handle(name, attrs, meta, art, prim_path)
         self._arm_articulations[prim_path] = art
