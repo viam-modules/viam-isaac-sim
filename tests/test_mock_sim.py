@@ -15,6 +15,7 @@ from viam.utils import dict_to_struct
 from isaac_module.models.arm import IsaacArm, _densify
 from isaac_module.models.base import IsaacBase
 from isaac_module.models.camera import IsaacCamera
+from isaac_module.models.scene_camera import IsaacSceneCamera
 from isaac_module.models.world import IsaacWorld
 from isaac_module.sim_manager import (
     SimConfig,
@@ -448,3 +449,17 @@ def test_capture_after_render_samples_once_per_capture_period():
         manager._capture_after_render()
     manager._capture_after_render()
     assert len(sampled) == 5
+
+
+def test_scene_camera_flies_and_still_renders(world):
+    cam = IsaacSceneCamera.new(
+        _config("fly-cam", {"world": "sim-world", "position": [3, 0, 1], "target": [0, 0, 0]}),
+        {},
+    )
+    view = asyncio.run(cam.do_command({"command": "set_view", "yaw_deg": 90.0}))
+    assert view["yaw_deg"] == pytest.approx(90.0)
+    image = asyncio.run(cam.get_image())
+    assert len(image.data) > 0
+    home = asyncio.run(cam.do_command({"command": "reset_view"}))
+    assert home["yaw_deg"] == pytest.approx(0.0)
+    assert home["recording"] is False
