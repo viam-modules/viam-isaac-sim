@@ -35,12 +35,33 @@ describe('createSender', () => {
 
     replies[0]?.resolve('first');
     await flush();
-    expect(onReply).toHaveBeenCalledWith('first');
     expect(calls).toEqual([{ yaw_deg: 1 }, { yaw_deg: 2, pitch_deg: 5 }]);
 
     replies[1]?.resolve('second');
     await flush();
+    expect(onReply).toHaveBeenCalledWith('second');
     expect(sender.busy).toBe(false);
+  });
+
+  it('skips a reply that a queued patch has already superseded', async () => {
+    const replies: ReturnType<typeof deferred<string>>[] = [];
+    const send = vi.fn(() => {
+      const d = deferred<string>();
+      replies.push(d);
+      return d.promise;
+    });
+    const onReply = vi.fn();
+    const sender = createSender(send, onReply, vi.fn());
+
+    sender.push({ a: 1 });
+    sender.push({ a: 2 });
+    replies[0]?.resolve('A');
+    await flush();
+    expect(onReply).not.toHaveBeenCalledWith('A');
+
+    replies[1]?.resolve('B');
+    await flush();
+    expect(onReply).toHaveBeenCalledWith('B');
   });
 
   it('reports errors and keeps going', async () => {

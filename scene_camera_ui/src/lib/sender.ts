@@ -1,7 +1,7 @@
 /**
  * Sends patches with at most one request in flight. Patches pushed while a request is pending
  * merge into one queued patch, so a fast drag costs one round trip at a time and the newest
- * values always win.
+ * values always win. A reply is reported only when nothing is queued behind it; errors always are.
  */
 export function createSender<P extends object, R>(
   send: (patch: P) => Promise<R>,
@@ -17,7 +17,9 @@ export function createSender<P extends object, R>(
     queued = undefined;
     inFlight = true;
     try {
-      onReply(await send(patch));
+      const reply = await send(patch);
+      // a queued patch supersedes this reply; reporting it would roll the caller's view back
+      if (queued === undefined) onReply(reply);
     } catch (error) {
       onError(error);
     } finally {

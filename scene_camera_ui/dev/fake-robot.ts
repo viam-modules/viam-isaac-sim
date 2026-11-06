@@ -70,6 +70,9 @@ export function createFakeRobot(resourceName: string): RobotClient {
         const next = { ...view, ...(patch as Partial<View>) };
         next.distance = Math.max(MIN_DISTANCE, next.distance);
         next.pitch_deg = Math.min(MAX_PITCH_DEG, Math.max(-MAX_PITCH_DEG, next.pitch_deg));
+        // same clamps as scene_camera.py: yaw wrapped to [-180, 180], fov within [1, 179]
+        next.yaw_deg = next.yaw_deg - 360 * Math.round(next.yaw_deg / 360);
+        next.fov_deg = Math.min(179, Math.max(1, next.fov_deg));
         view = next;
       }
       return { result: Struct.fromJson(reply() as unknown as JsonValue) };

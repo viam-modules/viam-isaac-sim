@@ -73,12 +73,25 @@
     fail,
   );
 
-  // server view: adopt each new poll unless the user is mid-interaction. Only new data re-runs
-  // this; re-running when a drag ends would re-adopt the pre-drag poll and snap the view back.
+  // A get_view poll can be in flight across a set_view and land with the older view. So a poll
+  // always updates the lock state, but only overwrites the local view once a full poll interval
+  // (plus slack) has passed since the user last changed it.
+  const POLL_SETTLE_MS = VIEW_POLL_MS + 500;
+  let lastLocalChange = -Infinity;
+
+  // Only new data re-runs this (untrack); a drag ending must not re-adopt an old poll.
   $effect(() => {
     const reply = viewQuery.data as unknown as ViewReply | undefined;
+    if (!reply) return;
     untrack(() => {
-      if (reply && !dragging && !sender.busy) adopt(reply);
+      errorMessage = undefined;
+      const settled = performance.now() - lastLocalChange > POLL_SETTLE_MS;
+      if (settled && !dragging && !sender.busy) {
+        adopt(reply);
+      } else {
+        lastReply = { ...(lastReply ?? reply), recording: reply.recording };
+        if (!reply.recording) lockedByError = false;
+      }
     });
   });
 
@@ -111,12 +124,14 @@
   });
 
   function update(next: View, patch: ViewPatch) {
+    lastLocalChange = performance.now();
     local = next;
     sender.push(patch);
   }
 
   async function goHome() {
     if (recording) return;
+    lastLocalChange = performance.now();
     sender.drop();
     try {
       adopt(await run({ command: 'reset_view' }));
@@ -138,20 +153,21 @@
   }
 
   function onPointerDown(event: PointerEvent) {
-    if (recording || !local) return;
+    if (event.button !== 0 || recording || !local) return;
     (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
     pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     dragging = true;
-    if (pointers.size === 2) pinchDistance = spread();
+    if (pointers.size >= 2) pinchDistance = spread();
   }
 
   function onPointerMove(event: PointerEvent) {
     const last = pointers.get(event.pointerId);
-    if (!dragging || !local || !last) return;
+    if (!dragging || recording || !local || !last) return;
     const dx = event.clientX - last.x;
     const dy = event.clientY - last.y;
     pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    if (pointers.size === 2) {
+    // any second pointer makes it a pinch, measured between the first two
+    if (pointers.size >= 2) {
       const now = spread();
       if (pinchDistance > 0 && now > 0) {
         const next = zoom(local, pinchDistance / now);
@@ -174,19 +190,22 @@
 
   function onPointerUp(event: PointerEvent) {
     pointers.delete(event.pointerId);
-    if (pointers.size < 2) pinchDistance = 0;
+    // re-measure: the first two pointers may now be a different pair
+    pinchDistance = pointers.size >= 2 ? spread() : 0;
     if (pointers.size === 0) dragging = false;
   }
 
   function onWheel(event: WheelEvent) {
     event.preventDefault();
-    if (recording || !local) return;
-    const next = zoom(local, event.deltaY > 0 ? ZOOM_STEP : 1 / ZOOM_STEP);
+    if (recording || !local || event.deltaY === 0) return;
+    // ~100 px per mouse notch; trackpads send many small deltas and scale down to match
+    const next = zoom(local, ZOOM_STEP ** (event.deltaY / 100));
     update(next, { distance: next.distance });
   }
 
   function onKeyDown(event: KeyboardEvent) {
-    if (recording || !local) return;
+    // leave ctrl/cmd combos (browser zoom, shortcuts) to the browser
+    if (event.ctrlKey || event.metaKey || recording || !local) return;
     const key = event.key;
     if (key === 'h' || key === 'H' || key === 'Home') {
       event.preventDefault();
@@ -325,6 +344,7 @@
         step="1"
         class="flex-1"
         value={fovShown}
+        aria-valuetext="{Math.round(fovShown)} degrees"
         disabled={recording || !local}
         oninput={(e) => (fovDraft = Number((e.currentTarget as HTMLInputElement).value))}
         onchange={commitFov}
