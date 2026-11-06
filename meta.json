@@ -20,6 +20,12 @@
       "short_description": "A simulated RGB camera in the Isaac Sim stage"
     },
     {
+      "model": "viam-labs:isaac-sim:scene_camera",
+      "api": "rdk:component:camera",
+      "short_description": "An orbitable scene-monitor camera with an in-app control",
+      "custom_control": "scene_camera_ui/dist/index.html"
+    },
+    {
       "model": "viam-labs:isaac-sim:gripper",
       "api": "rdk:component:gripper",
       "short_description": "A simulated UR-mounted Robotiq 2F-85 gripper"
@@ -47,6 +53,7 @@
     "path": "module.tar.gz",
     "arch": [
       "linux/amd64"
-    ]
+    ],
+    "setup": "./setup.sh"
   }
 }
