@@ -17,7 +17,7 @@
     {
       "model": "viam-labs:isaac-sim:camera",
       "api": "rdk:component:camera",
-      "short_description": "A simulated RGB camera in the Isaac Sim stage"
+      "short_description": "A simulated RGB or RGB-D camera in the Isaac Sim stage"
     },
     {
       "model": "viam-labs:isaac-sim:gripper",

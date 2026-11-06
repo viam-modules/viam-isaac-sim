@@ -315,9 +315,19 @@ def _reset_articulation_at_pose(
     articulation.set_world_pose(**pose)
 
 
+def camera_axes(attrs: dict[str, Any]) -> str:
+    """The Isaac camera_axes a camera is posed in; point clouds are returned
+    in the same axes so Viam's frame system places them correctly."""
+    if attrs.get("parent_prim"):
+        if attrs.get("local_orientation_wxyz") is not None:
+            return str(attrs.get("local_camera_axes", "ros"))
+        return "usd"
+    return str(attrs.get("camera_axes", "world"))
+
+
 def _parented_camera_pose(
     attrs: dict[str, Any],
-) -> tuple[tuple[float, float, float], tuple[float, float, float, float], str]:
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
     from .spatial import quat_from_euler_deg
 
     local_position = _vector3(
@@ -327,13 +337,12 @@ def _parented_camera_pose(
         return (
             local_position,
             _quaternion(attrs["local_orientation_wxyz"], "local_orientation_wxyz"),
-            str(attrs.get("local_camera_axes", "ros")),
         )
     roll, pitch, yaw = _vector3(
         attrs.get("local_orientation_rpy_deg", (180.0, 0.0, 0.0)),
         "local_orientation_rpy_deg",
     )
-    return local_position, quat_from_euler_deg(roll, pitch, yaw), "usd"
+    return local_position, quat_from_euler_deg(roll, pitch, yaw)
 
 
 def _values_close(actual: Sequence[float], expected: Sequence[float]) -> bool:
@@ -355,18 +364,16 @@ def _apply_camera_configuration(camera: Any, attrs: dict[str, Any]) -> None:
     parent = attrs.get("parent_prim")
     expected_position: Sequence[float] | None = None
     expected_orientation: Sequence[float] | None = None
-    camera_axes = "world"
+    axes = camera_axes(attrs)
     if parent:
-        expected_position, expected_orientation, camera_axes = _parented_camera_pose(
-            attrs
-        )
+        expected_position, expected_orientation = _parented_camera_pose(attrs)
         camera.set_local_pose(
             list(expected_position),
             list(expected_orientation),
-            camera_axes=camera_axes,
+            camera_axes=axes,
         )
         actual_position, actual_orientation = camera.get_local_pose(
-            camera_axes=camera_axes
+            camera_axes=axes
         )
     else:
         if attrs.get("target") is not None:
@@ -399,10 +406,10 @@ def _apply_camera_configuration(camera: Any, attrs: dict[str, Any]) -> None:
                 list(expected_orientation)
                 if expected_orientation is not None
                 else None,
-                camera_axes=camera_axes,
+                camera_axes=axes,
             )
         actual_position, actual_orientation = camera.get_world_pose(
-            camera_axes=camera_axes
+            camera_axes=axes
         )
 
     if expected_position is not None and not _values_close(
@@ -1857,6 +1864,7 @@ class SimManager:
             "local_orientation_wxyz",
             "local_orientation_rpy_deg",
             "local_camera_axes",
+            "camera_axes",
             "fov_deg",
             "near_clip_m",
         }
@@ -2529,6 +2537,8 @@ class SimManager:
 
         cam = self._isaac.Camera(**kwargs)
         cam.initialize()
+        if attrs.get("depth"):
+            cam.add_distance_to_image_plane_to_frame()
         _apply_camera_configuration(cam, attrs)
         return IsaacCameraHandle(self, cam)
 
@@ -4066,6 +4076,14 @@ class CameraHandle:
         """Apply live-mutable camera configuration on the simulator thread."""
         raise NotImplementedError
 
+    def get_rgbd(self):
+        """(rgb (H, W, 3) uint8, depth (H, W) float32 meters) from one frame."""
+        raise NotImplementedError
+
+    def intrinsics(self) -> tuple[float, float, float, float]:
+        """(fx, fy, cx, cy) in pixels."""
+        raise NotImplementedError
+
 
 class IsaacCameraHandle(CameraHandle):
     def __init__(self, sim: SimManager, camera) -> None:
@@ -4086,6 +4104,28 @@ class IsaacCameraHandle(CameraHandle):
 
     def get_rgb(self):
         return self._sim.run(self.capture_rgb)
+
+    def _capture_rgbd(self):
+        import numpy as np
+
+        rgb = self.capture_rgb()
+        depth = self._cam.get_depth()
+        if depth is None or depth.size == 0:
+            raise RuntimeError("no depth frame available yet - is the simulation playing?")
+        return rgb, np.asarray(depth, dtype=np.float32).squeeze().copy()  # some versions return (H, W, 1)
+
+    def get_rgbd(self):
+        return self._sim.run(self._capture_rgbd)
+
+    def _intrinsics(self) -> tuple[float, float, float, float]:
+        # from the prim's real lens, so attached prim_path cameras without
+        # fov_deg are correct too
+        width, height = self._cam.get_resolution()
+        fx = width * self._cam.get_focal_length() / self._cam.get_horizontal_aperture()
+        return fx, fx, width / 2.0, height / 2.0
+
+    def intrinsics(self) -> tuple[float, float, float, float]:
+        return self._sim.run(self._intrinsics)
 
 
 class MockCameraHandle(CameraHandle):
@@ -4111,6 +4151,18 @@ class MockCameraHandle(CameraHandle):
 
     def capture_rgb(self):
         return self.get_rgb()
+
+    def get_rgbd(self):
+        import numpy as np
+
+        # tilted plane: 1 m at the top row to 2 m at the bottom
+        rows = np.linspace(1.0, 2.0, self._h, dtype=np.float32)
+        return self.get_rgb(), np.repeat(rows[:, None], self._w, axis=1)
+
+    def intrinsics(self) -> tuple[float, float, float, float]:
+        fov = math.radians(float(self._attrs.get("fov_deg", 70.0)))
+        fx = (self._w / 2.0) / math.tan(fov / 2.0)
+        return fx, fx, self._w / 2.0, self._h / 2.0
 
 
 class BaseHandle:
