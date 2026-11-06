@@ -301,6 +301,55 @@ def _get_or_add_xform_op(
     return add_op()
 
 
+def _merge_position_gains(
+    dof_names: Sequence[str],
+    kps: Any,
+    kds: Any,
+    position_gains: dict[str, tuple[float, float]],
+) -> tuple[Any, Any]:
+    """Copy of (kps, kds) with each named DOF's (stiffness, damping) put back.
+
+    Accepts the (ndof,) or (1, ndof) arrays an articulation controller returns.
+    """
+    import numpy as np
+
+    kps = np.array(kps, dtype=float).copy()
+    kds = np.array(kds, dtype=float).copy()
+    flat_kp, flat_kd = kps.reshape(-1), kds.reshape(-1)
+    for name, (stiffness, damping) in position_gains.items():
+        if name in dof_names:
+            index = list(dof_names).index(name)
+            flat_kp[index], flat_kd[index] = stiffness, damping
+    return kps, kds
+
+
+def _usd_drive_gains(root_prim: Any, names: set[str]) -> dict[str, tuple[float, float]]:
+    """Authored (stiffness, damping) of the named joints under `root_prim`, per radian/metre.
+
+    USD angular drive gains are per degree; articulation controllers use per radian.
+    """
+    import math
+
+    from pxr import Usd, UsdPhysics
+
+    gains: dict[str, tuple[float, float]] = {}
+    for prim in Usd.PrimRange(root_prim):
+        if prim.GetName() not in names:
+            continue
+        if prim.IsA(UsdPhysics.RevoluteJoint):
+            kind, scale = "angular", 180.0 / math.pi
+        elif prim.IsA(UsdPhysics.PrismaticJoint):
+            kind, scale = "linear", 1.0
+        else:
+            continue
+        drive = UsdPhysics.DriveAPI(prim, kind)
+        stiffness = drive.GetStiffnessAttr().Get() if drive else None
+        if stiffness:
+            damping = drive.GetDampingAttr().Get() or 0.0
+            gains[prim.GetName()] = (stiffness * scale, damping * scale)
+    return gains
+
+
 def _reset_articulation_at_pose(
     world: Any,
     articulation: Any,
@@ -476,6 +525,16 @@ class SimManager:
         # resources on config change, but prims can't be re-spawned without
         # restarting kit, so handles are cached per component name.
         self._handles: dict[str, tuple[dict[str, Any], Any]] = {}
+        # prim path -> SingleArticulation, so several arm components can each
+        # drive a joint subset of one articulation (e.g. a humanoid)
+        self._arm_articulations: dict[str, Any] = {}
+        # prim path -> name of the arm that loaded its USD; released on close so a
+        # renamed or replacement arm can attach to the articulation left in the stage
+        self._arm_usd_owners: dict[str, str] = {}
+        # Bases that share an articulation with arms. WheeledRobot switches its whole
+        # articulation to velocity control (stiffness 0) whenever it initializes, which
+        # turns every non-wheel joint into a damper; re-apply their USD gains after resets.
+        self._shared_bases: list[tuple[Any, str, tuple[str, ...]]] = []
         self._prop_specs: dict[str, dict[str, Any]] = {}
         self._mock_prop_poses: dict[str, dict[str, Any]] = {}
         # rigid bodies that motors push and movement sensors read, keyed by
@@ -1941,6 +2000,24 @@ class SimManager:
 
         usd, meta = self._resolve_usd(attrs)
         prim_path = attrs.get("prim_path") or f"/World/{_prim_name(name)}"
+        shared = self._arm_articulations.get(prim_path)
+        if shared is not None:
+            # Another arm already spawned and reset this articulation. Reuse its
+            # wrapper: re-posing the base or calling world.reset() here would
+            # move the shared robot and reset the sibling arm's joints.
+            if usd:
+                owner = self._arm_usd_owners.get(prim_path)
+                if owner not in (None, name):
+                    raise ValueError(
+                        f"arm {name!r}: {prim_path} already has an arm attached; "
+                        "set usd_path/asset on only one arm per prim_path"
+                    )
+                # The loader was closed (e.g. renamed): its prims are still in
+                # the stage, so take over the articulation instead of re-loading.
+                handle = self._isaac_arm_handle(name, attrs, meta, shared, prim_path)
+                self._arm_usd_owners[prim_path] = name
+                return handle
+            return self._isaac_arm_handle(name, attrs, meta, shared, prim_path)
         if usd:
             self._isaac.add_reference_to_stage(usd_path=usd, prim_path=prim_path)
             self._require_prim(prim_path)
@@ -1975,34 +2052,53 @@ class SimManager:
         art = self._isaac.SingleArticulation(prim_path=prim_path, name=name)
         self.world.scene.add(art)
         _reset_articulation_at_pose(self.world, art, position, orientation)
+        self._restore_shared_base_gains()
+        handle = self._isaac_arm_handle(name, attrs, meta, art, prim_path)
+        self._arm_articulations[prim_path] = art
+        if usd:
+            self._arm_usd_owners[prim_path] = name
+        return handle
 
+    def _isaac_arm_handle(
+        self,
+        name: str,
+        attrs: dict[str, Any],
+        meta: dict[str, Any],
+        art: Any,
+        prim_path: str,
+    ) -> "IsaacArmHandle":
         ee = None
         ee_path = attrs.get("end_effector_prim")
         if not ee_path and meta.get("end_effector_link"):
             ee_path = f"{prim_path}/{meta['end_effector_link']}"
         if ee_path:
             ee = self._isaac.SingleXFormPrim(ee_path)
-        return IsaacArmHandle(
-            self,
-            art,
-            ee,
-            prim_path,
-            meta.get("joint_names"),
-            is_moving_velocity_threshold_rad_s=float(
-                attrs.get(
-                    "is_moving_velocity_threshold_rad_s",
-                    DEFAULT_ARM_IS_MOVING_VELOCITY_THRESHOLD_RAD_S,
-                )
-            ),
-            max_joint_deg_s=(
-                float(attrs["max_joint_deg_s"]) if "max_joint_deg_s" in attrs else None
-            ),
-            max_joint_deg_s2=(
-                float(attrs["max_joint_deg_s2"])
-                if "max_joint_deg_s2" in attrs
-                else None
-            ),
-        )
+        try:
+            return IsaacArmHandle(
+                self,
+                art,
+                ee,
+                prim_path,
+                attrs.get("joint_names") or meta.get("joint_names"),
+                is_moving_velocity_threshold_rad_s=float(
+                    attrs.get(
+                        "is_moving_velocity_threshold_rad_s",
+                        DEFAULT_ARM_IS_MOVING_VELOCITY_THRESHOLD_RAD_S,
+                    )
+                ),
+                max_joint_deg_s=(
+                    float(attrs["max_joint_deg_s"])
+                    if "max_joint_deg_s" in attrs
+                    else None
+                ),
+                max_joint_deg_s2=(
+                    float(attrs["max_joint_deg_s2"])
+                    if "max_joint_deg_s2" in attrs
+                    else None
+                ),
+            )
+        except ValueError as exc:
+            raise ValueError(f"arm {name!r}: {exc}") from exc
 
     def create_gripper(self, name: str, attrs: dict[str, Any]) -> "GripperHandle":
         """Attach a supported gripper to an already-created arm articulation."""
@@ -2557,6 +2653,17 @@ class SimManager:
             )
         return self._cached_handle("base", name, attrs, factory)
 
+    def _restore_shared_base_gains(self) -> None:
+        """Give non-wheel joints of base-shared articulations their position gains back."""
+        for robot, prim_path, non_wheel in self._shared_bases:
+            gains = _usd_drive_gains(self._isaac.get_prim_at_path(prim_path), set(non_wheel))
+            if not gains:
+                continue
+            controller = robot.get_articulation_controller()
+            kps, kds = controller.get_gains()
+            kps, kds = _merge_position_gains(list(robot.dof_names), kps, kds, gains)
+            controller.set_gains(kps=kps, kds=kds)
+
     def _create_base_isaac(self, name: str, attrs: dict[str, Any]) -> "IsaacBaseHandle":
         from .spatial import to_vec3
 
@@ -2585,6 +2692,10 @@ class SimManager:
         robot = self._isaac.WheeledRobot(**base_kwargs)
         self.world.scene.add(robot)
         self.world.reset()
+        non_wheel = tuple(n for n in robot.dof_names if n not in wheel_joints)
+        if non_wheel:
+            self._shared_bases.append((robot, prim_path, non_wheel))
+            self._restore_shared_base_gains()
 
         controller = self._isaac.DifferentialController(
             name=f"{name}_controller",
@@ -2710,6 +2821,15 @@ class SimManager:
         """Forget a component's handle when viam-server closes it, so a
         renamed or removed resource does not leave a stale entry behind."""
         self._handles.pop(name, None)
+
+    def remove_arm(self, name: str) -> None:
+        """Forget a closed arm's handle and release any USD it loaded. The
+        articulation stays in the stage (and in _arm_articulations) for the next
+        arm that names its prim_path."""
+        self.remove_handle(name)
+        for prim_path, owner in list(self._arm_usd_owners.items()):
+            if owner == name:
+                del self._arm_usd_owners[prim_path]
 
     def create_motor(self, name: str, attrs: dict[str, Any]) -> "MotorHandle":
         from .spatial import to_vec3
@@ -3421,6 +3541,10 @@ class MockArmHandle(ArmHandle):
         dof = int(attrs.get("mock_dof", 6))
         meta = KNOWN_ASSETS.get(str(attrs.get("asset", "")), {})
         configured_names = tuple(meta.get("joint_names", ()))
+        if attrs.get("joint_names"):
+            # like Isaac: an explicit joint subset defines the arm's DOFs
+            configured_names = tuple(attrs["joint_names"])
+            dof = len(configured_names)
         self._joint_names = (
             configured_names
             if len(configured_names) == dof
