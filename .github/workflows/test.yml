@@ -9,3 +9,20 @@ jobs:
     - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
     - run: make lint
     - run: make test
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scene_camera_ui
+    steps:
+    - uses: actions/checkout@v7
+    - uses: pnpm/action-setup@v4
+      with:
+        version: 10
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: pnpm
+        cache-dependency-path: scene_camera_ui/pnpm-lock.yaml
+    - run: pnpm install --frozen-lockfile
+    - run: pnpm verify
