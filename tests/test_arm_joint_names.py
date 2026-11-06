@@ -64,6 +64,8 @@ def _manager():
     manager = object.__new__(SimManager)
     calls = []
     manager._arm_articulations = {}
+    manager._arm_usd_owners = {}
+    manager._handles = {}
     manager._shared_bases = []
     manager.world = SimpleNamespace(
         scene=SimpleNamespace(add=lambda art: calls.append(("add", art.name))),
@@ -127,6 +129,21 @@ def test_only_one_arm_per_prim_may_load_the_usd():
     manager._create_arm_isaac("torso", attrs)
     with pytest.raises(ValueError, match="only one arm per prim_path"):
         manager._create_arm_isaac("head", attrs)
+
+
+def test_closed_loader_arm_releases_prim_for_its_replacement():
+    manager, calls = _manager()
+    attrs = {"usd_path": "/robots/vega.usd", "prim_path": "/World/vega"}
+    old = manager._create_arm_isaac("robot", attrs)
+    spawn_calls = list(calls)
+
+    manager.remove_arm("robot")  # what IsaacArm.close does on rename/removal
+    new = manager._create_arm_isaac("torso", attrs)
+
+    assert new._art is old._art
+    assert calls == spawn_calls  # prims already in the stage: no reload, no reset
+    with pytest.raises(ValueError, match="only one arm per prim_path"):
+        manager._create_arm_isaac("head", attrs)  # the new loader holds the claim
 
 
 WHEELS = ("L_wheel_j2", "R_wheel_j2")
