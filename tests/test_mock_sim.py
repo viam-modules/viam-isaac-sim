@@ -20,6 +20,8 @@ from isaac_module.sim_manager import (
     SimConfig,
     SimManager,
     _visual_material_properties,
+    RealTimePacer,
+    parse_markers,
     default_rendering_dt,
     validate_rendering_dt,
 )
@@ -76,6 +78,53 @@ def test_mock_sim_clock_advances(sim):
     before = sim.sim_time_s()
     time.sleep(0.05)
     assert sim.sim_time_s() > before
+
+
+def test_parse_markers_defaults_and_validation():
+    markers = parse_markers(
+        [{"name": "front", "color": [1, 1, 0], "position": [0.05, 0, 0.08]}]
+    )
+    assert markers == [
+        {
+            "name": "front",
+            "color": (1.0, 1.0, 0.0),
+            "position": (0.05, 0.0, 0.08),
+            "size_m": 0.03,
+            "thickness_m": 0.002,
+        }
+    ]
+    assert parse_markers(None) == []
+    with pytest.raises(ValueError, match="color"):
+        parse_markers([{"name": "a", "color": [2, 0, 0], "position": [0, 0, 0]}])
+    with pytest.raises(ValueError, match="size_m"):
+        parse_markers([{"name": "a", "color": [1, 0, 0], "position": [0, 0, 0], "size_m": 0}])
+    with pytest.raises(ValueError, match="unique"):
+        parse_markers([
+            {"name": "a", "color": [1, 0, 0], "position": [0, 0, 0]},
+            {"name": "a", "color": [0, 1, 0], "position": [0, 0, 0]},
+        ])
+
+
+def test_real_time_pacer_sleeps_off_lead_and_forgives_deficit():
+    now = [0.0]
+    slept = []
+
+    def sleep(s):
+        slept.append(s)
+        now[0] += s
+
+    pacer = RealTimePacer(clock=lambda: now[0], sleep=sleep)
+    pacer.after_step(0.1)  # first step only anchors
+    assert slept == []
+    now[0] += 0.02  # a fast step: 0.1 s of sim in 0.02 s of wall
+    pacer.after_step(0.1)
+    assert slept == [pytest.approx(0.08)]
+    now[0] += 0.5  # a slow step falls behind wall time
+    pacer.after_step(0.1)
+    assert len(slept) == 1  # no sleep, and the deficit isn't banked:
+    now[0] += 0.02
+    pacer.after_step(0.1)  # the next fast step is held to real time again
+    assert slept[-1] == pytest.approx(0.08)
 
 
 @pytest.mark.parametrize(
