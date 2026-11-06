@@ -878,6 +878,9 @@ class SimManager:
         # prim path -> SingleArticulation, so several arm components can each
         # drive a joint subset of one articulation (e.g. a humanoid)
         self._arm_articulations: dict[str, Any] = {}
+        # prim path -> name of the arm that loaded its USD; released on close so a
+        # renamed or replacement arm can attach to the articulation left in the stage
+        self._arm_usd_owners: dict[str, str] = {}
         # Bases that share an articulation with arms. WheeledRobot switches its whole
         # articulation to velocity control (stiffness 0) whenever it initializes, which
         # turns every non-wheel joint into a damper; re-apply their USD gains after resets.
@@ -2553,10 +2556,17 @@ class SimManager:
             # wrapper: re-posing the base or calling world.reset() here would
             # move the shared robot and reset the sibling arm's joints.
             if usd:
-                raise ValueError(
-                    f"arm {name!r}: {prim_path} already has an arm attached; "
-                    "set usd_path/asset on only one arm per prim_path"
-                )
+                owner = self._arm_usd_owners.get(prim_path)
+                if owner not in (None, name):
+                    raise ValueError(
+                        f"arm {name!r}: {prim_path} already has an arm attached; "
+                        "set usd_path/asset on only one arm per prim_path"
+                    )
+                # The loader was closed (e.g. renamed): its prims are still in
+                # the stage, so take over the articulation instead of re-loading.
+                handle = self._isaac_arm_handle(name, attrs, meta, shared, prim_path)
+                self._arm_usd_owners[prim_path] = name
+                return handle
             return self._isaac_arm_handle(name, attrs, meta, shared, prim_path)
         if usd:
             self._isaac.add_reference_to_stage(usd_path=usd, prim_path=prim_path)
@@ -2607,6 +2617,8 @@ class SimManager:
         self._restore_shared_base_gains()
         handle = self._isaac_arm_handle(name, attrs, meta, art, prim_path)
         self._arm_articulations[prim_path] = art
+        if usd:
+            self._arm_usd_owners[prim_path] = name
         return handle
 
     def _isaac_arm_handle(
@@ -3481,6 +3493,15 @@ class SimManager:
         """Forget a component's handle when viam-server closes it, so a
         renamed or removed resource does not leave a stale entry behind."""
         self._handles.pop(name, None)
+
+    def remove_arm(self, name: str) -> None:
+        """Forget a closed arm's handle and release any USD it loaded. The
+        articulation stays in the stage (and in _arm_articulations) for the next
+        arm that names its prim_path."""
+        self.remove_handle(name)
+        for prim_path, owner in list(self._arm_usd_owners.items()):
+            if owner == name:
+                del self._arm_usd_owners[prim_path]
 
     def create_motor(self, name: str, attrs: dict[str, Any]) -> "MotorHandle":
         from .spatial import to_vec3

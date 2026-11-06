@@ -283,6 +283,12 @@ class IsaacArm(Arm, EasyResource):
             attrs["initial_joint_positions_deg"] = initial_joint_positions_deg
         self._handle = SimManager.get().create_arm(self.name, attrs)
 
+    async def close(self) -> None:
+        """viam-server removed or renamed this arm: drop its cached handle and
+        its claim on a shared articulation's USD."""
+        self._handle = None
+        SimManager.get().remove_arm(self.name)
+
     def _h(self) -> ArmHandle:
         if self._handle is None:
             raise RuntimeError(f"arm {self.name} is not attached to the sim")
