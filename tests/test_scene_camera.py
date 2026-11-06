@@ -128,3 +128,107 @@ def test_frame_translation_is_home_position(manager):
 def test_meta_path_points_at_repo_meta_json():
     assert META_PATH.name == "meta.json"
     assert META_PATH.is_file()
+
+
+# ---- set_view / reset_view ----
+
+def test_set_view_merges_and_moves_camera(manager):
+    cam = _camera({"position": [3, 0, 0], "target": [0, 0, 0]})
+    view = cam.set_view({"yaw_deg": 90.0})
+    assert view["yaw_deg"] == pytest.approx(90.0)
+    assert view["distance"] == pytest.approx(3.0)  # untouched keys kept
+    attrs = manager._handles["overview"][0]
+    assert attrs["position"] == pytest.approx([0.0, 3.0, 0.0], abs=1e-9)
+    assert attrs["target"] == [0.0, 0.0, 0.0]
+
+
+def test_set_view_clamps(manager):
+    cam = _camera({"position": [3, 0, 0]})
+    view = cam.set_view({"pitch_deg": 120.0, "distance": 0.0, "yaw_deg": 270.0, "fov_deg": 500.0})
+    assert view["pitch_deg"] == 89.0
+    assert view["distance"] == 0.05
+    assert view["yaw_deg"] == pytest.approx(-90.0)
+    assert view["fov_deg"] == 179.0
+
+
+def test_set_view_target_and_fov(manager):
+    cam = _camera({"position": [3, 0, 0]})
+    view = cam.set_view({"target": [1, 2, 3], "fov_deg": 40})
+    assert view["target"] == [1.0, 2.0, 3.0]
+    attrs = manager._handles["overview"][0]
+    assert attrs["fov_deg"] == 40.0
+    assert attrs["position"] == pytest.approx([4.0, 2.0, 3.0])
+
+
+@pytest.mark.parametrize(
+    "patch, match",
+    [
+        ({"zoom": 2}, "unknown keys"),
+        ({"distance": "far"}, "distance must be a finite number"),
+        ({"yaw_deg": True}, "yaw_deg must be a finite number"),
+        ({"target": [1, 2]}, "target must be"),
+    ],
+)
+def test_set_view_rejects_bad_input(manager, patch, match):
+    cam = _camera({})
+    before = cam.get_view()
+    with pytest.raises(ValueError, match=match):
+        cam.set_view(patch)
+    assert cam.get_view() == before
+
+
+def test_reset_view_returns_home(manager):
+    cam = _camera({"position": [3, 0, 0]})
+    cam.set_view({"yaw_deg": 45.0, "distance": 1.0})
+    view = cam.reset_view()
+    assert view["yaw_deg"] == pytest.approx(0.0)
+    assert view["distance"] == pytest.approx(3.0)
+    assert manager._handles["overview"][0]["position"] == pytest.approx([3.0, 0.0, 0.0])
+
+
+def test_recording_blocks_and_reports(manager):
+    cam = _camera({"position": [3, 0, 0]})
+    # fly first: a reset_view while already at home is a no-op that create_camera never rejects
+    cam.set_view({"yaw_deg": 30.0})
+    before = cam.get_view()
+    manager._episode_id = "000001"
+    with pytest.raises(RuntimeError, match="during episode capture"):
+        cam.set_view({"yaw_deg": 45.0})
+    with pytest.raises(RuntimeError, match="during episode capture"):
+        cam.reset_view()
+    after = cam.get_view()
+    assert after["recording"] is True
+    assert {k: after[k] for k in before if k != "recording"} == {
+        k: before[k] for k in before if k != "recording"
+    }
+
+
+def test_reconfigure_after_flying_snaps_home_without_restart(manager):
+    # config without target/fov_deg: regression for create_camera's
+    # "removed key requires a module restart" rules
+    config = _config("overview", {"world": "sim-world", "position": [3, 0, 1]})
+    cam = IsaacSceneCamera.new(config, {})
+    cam.set_view({"yaw_deg": 90.0, "fov_deg": 50.0})
+    cam.reconfigure(config, {})  # must not raise
+    view = cam.get_view()
+    assert view["yaw_deg"] == pytest.approx(0.0)
+    assert view["fov_deg"] == 70.0
+    assert manager._handles["overview"][0]["position"] == [3.0, 0.0, 1.0]
+
+
+# ---- do_command ----
+
+def test_do_command_unknown(manager):
+    cam = _camera({})
+    with pytest.raises(ValueError, match="unknown command 'nope'"):
+        asyncio.run(cam.do_command({"command": "nope"}))
+
+
+def test_do_command_serves_custom_control(manager):
+    if not (META_PATH.parent / "scene_camera_ui" / "dist" / "index.html").is_file():
+        pytest.skip("scene_camera_ui not built (the UI CI job covers the artifact)")
+    cam = _camera({})
+    served = asyncio.run(cam.do_command({"command": "get-custom-control"}))
+    assert served["path"] == "scene_camera_ui/dist/index.html"
+    assert served["html"].lstrip().lower().startswith("<!doctype html")
+    assert len(served["revision"]) == 64
