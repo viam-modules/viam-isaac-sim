@@ -217,6 +217,74 @@ def validate_rendering_dt(physics_dt: float, rendering_dt: float) -> None:
         )
 
 
+def parse_markers(raw: Any) -> list[dict[str, Any]]:
+    """Validate a base's ``markers``: visual-only colored squares riding on
+    the base for cameras to find (fiducials). Each is
+    ``{name, color: [r,g,b] 0-1, position: [x,y,z] m in the chassis link,
+    size_m (default 0.03), thickness_m (default 0.002)}``."""
+    if raw is None:
+        return []
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError("markers must be a list")
+    markers: list[dict[str, Any]] = []
+    for entry in raw:
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("each marker needs a name")
+        color = tuple(float(v) for v in entry.get("color", ()))
+        if len(color) != 3 or not all(0.0 <= v <= 1.0 for v in color):
+            raise ValueError(f"marker {name}: color must be [r, g, b] in 0-1")
+        position = tuple(float(v) for v in entry.get("position", ()))
+        if len(position) != 3 or not all(math.isfinite(v) for v in position):
+            raise ValueError(f"marker {name}: position must be [x, y, z] meters")
+        size = float(entry.get("size_m", 0.03))
+        thickness = float(entry.get("thickness_m", 0.002))
+        for key, value in (("size_m", size), ("thickness_m", thickness)):
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"marker {name}: {key} must be positive")
+        markers.append(
+            {
+                "name": name,
+                "color": color,
+                "position": position,
+                "size_m": size,
+                "thickness_m": thickness,
+            }
+        )
+    if len({m["name"] for m in markers}) != len(markers):
+        raise ValueError("marker names must be unique")
+    return markers
+
+
+class RealTimePacer:
+    """Holds simulator time to wall time when the sim could run faster.
+
+    After each step, sleeps off any lead sim time has over wall time. A step
+    that falls behind isn't caught up later: a sim slower than real time just
+    runs slow, and the next fast step is held to real time from there."""
+
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._clock = clock
+        self._sleep = sleep
+        self._deadline: float | None = None
+
+    def after_step(self, sim_dt: float) -> None:
+        now = self._clock()
+        if self._deadline is None:
+            self._deadline = now
+            return
+        target = self._deadline + sim_dt
+        if target > now:
+            self._sleep(target - now)
+            self._deadline = target
+        else:
+            self._deadline = now
+
+
 @dataclass
 class SimConfig:
     mock: bool = False
@@ -233,6 +301,9 @@ class SimConfig:
     # physics callback runs before that update's render, so its camera
     # reads return an older frame than its joint state.
     capture_after_render: bool = False
+    # Hold sim time to wall time (never faster) so clients that integrate
+    # over the wall clock (odometry, SLAM, navigation) see consistent motion.
+    real_time: bool = False
     boot_timeout: float = 1200.0
     # IP the livestream advertises to clients; auto-detected if empty
     livestream_public_ip: str = ""
@@ -588,6 +659,8 @@ class SimManager:
         self._booted.set()
 
         last = time.monotonic()
+        pacer = RealTimePacer() if self.cfg and self.cfg.real_time and not self.mock else None
+        step_dt = self.cfg.resolved_rendering_dt() if pacer else 0.0
         while not self._stop.is_set():
             self._drain_tasks()
             now = time.monotonic()
@@ -611,6 +684,8 @@ class SimManager:
                         LOGGER.exception("render callback failed")
                 if self._capture_after_render_active:
                     self._capture_after_render()
+                if pacer is not None:
+                    pacer.after_step(step_dt)
 
         if self._episode_id is not None:
             try:
@@ -2674,7 +2749,31 @@ class SimManager:
         )
         handle = IsaacBaseHandle(self, robot, controller, wheel_radius, wheel_base)
         self.world.add_physics_callback(f"{name}_drive", handle._on_physics_step)
+        markers = parse_markers(attrs.get("markers"))
+        if markers:
+            chassis = f"{prim_path}/{attrs.get('chassis_link') or meta.get('chassis_link', 'chassis')}"
+            self._require_prim(chassis)
+            self._add_markers(chassis, markers)
         return handle
+
+    def _add_markers(self, parent_path: str, markers: list[dict[str, Any]]) -> None:
+        """Visual-only squares (no collision) under a moving link, so they
+        ride along with it."""
+        from pxr import Gf, Sdf, UsdGeom
+
+        stage = self.world.stage
+        for marker in markers:
+            path = f"{parent_path}/viam_marker_{_prim_name(marker['name'])}"
+            cube = UsdGeom.Cube.Define(stage, Sdf.Path(path))
+            cube.GetSizeAttr().Set(1.0)
+            xform = UsdGeom.Xformable(cube.GetPrim())
+            xform.AddTranslateOp().Set(Gf.Vec3d(*marker["position"]))
+            xform.AddScaleOp().Set(
+                Gf.Vec3f(marker["size_m"], marker["size_m"], marker["thickness_m"])
+            )
+            self._bind_preview_surface(
+                path, diffuse_color=marker["color"], roughness=0.6, metallic=0.0
+            )
 
     # ------------------------------------------------------------------
     # rigid bodies: floating props, thruster motors, movement sensors
