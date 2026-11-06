@@ -44,6 +44,16 @@ def optical_to_axes(points: np.ndarray, axes: str) -> np.ndarray:
     return (points @ _OPTICAL_TO[axes].T).astype(np.float32, copy=False)
 
 
+def filter_range(
+    points: np.ndarray, min_m: float = 0.0, max_m: Optional[float] = None
+) -> np.ndarray:
+    r = np.linalg.norm(points, axis=1)
+    keep = r >= min_m
+    if max_m is not None:
+        keep &= r <= max_m
+    return points[keep]
+
+
 def to_pcd(points: np.ndarray, colors: Optional[np.ndarray] = None) -> bytes:
     """Binary PCD v0.7 in meters, the format viam-server reads."""
     pts = np.ascontiguousarray(points, dtype="<f4").reshape(-1, 3)
