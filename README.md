@@ -326,6 +326,20 @@ For direct `DoCommand` callers, `set_input` accepts only `0` or `1` on Lite6;
 position-capable grippers accept any finite value in `[0,1]`. Both forms latch
 the target without waiting for settlement.
 
+A hand whose fingers are already joints of the arm's USD (e.g. the Franka hand
+on RidgebackFranka) needs no preset: replace `asset` with `joint_names`
+(first is the drive joint; the rest are driven to the same target),
+`open_position` and `closed_position` in the joints' native units
+(`position_unit`: `m` default, or `rad`). `drive_stiffness` / `drive_damping`
+(default 2000 / 100) override the USD's finger gains, which can be stiff
+enough to squeeze a held object out (RidgebackFranka ships 1e7 and 1200 N).
+`holding_tolerance` and `tcp_offset_m` are optional.
+
+```json
+{ "arm": "franka", "joint_names": ["panda_finger_joint1", "panda_finger_joint2"],
+  "open_position": 0.04, "closed_position": 0.0 }
+```
+
 ### camera attributes
 
 `world` is required. Prefer the component's standard `frame` for placement;
@@ -383,6 +397,15 @@ whose FK falls below the configured floor.
 `world` (required), `asset` (e.g. `jetbot`, which brings wheel defaults) or
 `usd_path`/`prim_path` plus `wheel_joints: [left, right]`, `wheel_radius`,
 `wheel_base`. `max_linear_mps` / `max_angular_rps` scale `SetPower`.
+
+Holonomic mode: `planar_joints: [x, y, yaw]` drives those joints of the
+articulation an arm on the same `prim_path` loads, instead of wheels, and
+`linear.x` strafes. Add that arm to `depends_on`. For mobile manipulators like
+RidgebackFranka whose base moves through virtual joints off a floating root,
+set `fixed_base_link` on that arm (`"world"` there) so the root is fixed to the
+world, and give it `kinematics/ridgeback_planar.urdf` as `kinematics_url` so an
+arm parented to it in the frame system follows the base. Arms report prismatic
+joints in millimeters and revolute joints in degrees.
 
 ### Floating props, thrusters and movement sensors
 

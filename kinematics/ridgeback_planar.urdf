@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<!-- RidgebackFranka's virtual base joints (x, y, yaw) for Viam's frame system,
+     so an arm parented to this component follows the base. Joint names match
+     the USD; the isaac-sim arm reports the prismatic ones in mm. The end frame is
+     base_link at floor level; the Franka mounts at +0.30 x, +0.28 z from it. -->
+<robot name="ridgeback_planar">
+  <link name="world_link"/>
+  <link name="dummy_base_x"/>
+  <link name="dummy_base_y"/>
+  <link name="base_link">
+    <!-- chassis, 0.96 x 0.79 m footprint, top 1 cm under the Franka mount -->
+    <collision><origin xyz="0 0 0.145" rpy="0 0 0"/><geometry><box size="0.96 0.79 0.25"/></geometry></collision>
+  </link>
+
+  <joint name="dummy_base_prismatic_x_joint" type="prismatic">
+    <parent link="world_link"/><child link="dummy_base_x"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/><axis xyz="1 0 0"/>
+    <limit lower="-50" upper="50" effort="4800" velocity="15"/>
+  </joint>
+  <joint name="dummy_base_prismatic_y_joint" type="prismatic">
+    <parent link="dummy_base_x"/><child link="dummy_base_y"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/><axis xyz="0 1 0"/>
+    <limit lower="-50" upper="50" effort="4800" velocity="15"/>
+  </joint>
+  <joint name="dummy_base_revolute_z_joint" type="revolute">
+    <parent link="dummy_base_y"/><child link="base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-6.2831853" upper="6.2831853" effort="4800" velocity="15"/>
+  </joint>
+</robot>

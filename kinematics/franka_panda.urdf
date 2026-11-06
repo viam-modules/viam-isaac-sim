@@ -1,0 +1,76 @@
+<?xml version="1.0"?>
+<!-- Franka Panda arm, panda_link0 to panda_hand, for Viam motion planning.
+     Joint frames and limits follow franka_description and match Isaac's
+     FrankaPanda / RidgebackFranka USDs. The hand frame is the flange the
+     isaac-sim arm reports via end_effector_prim; the fingertip TCP is a
+     further 103.35 mm along its +Z. Collision boxes are coarse per-link hulls;
+     the hand box is the palm only, the fingers belong to the gripper component. -->
+<robot name="franka_panda">
+  <link name="panda_link0">
+    <collision><origin xyz="-0.04 0.0 0.07" rpy="0 0 0"/><geometry><box size="0.23 0.2 0.14"/></geometry></collision>
+  </link>
+  <link name="panda_link1">
+    <collision><origin xyz="0.0 0.0 -0.09" rpy="0 0 0"/><geometry><box size="0.13 0.13 0.25"/></geometry></collision>
+  </link>
+  <link name="panda_link2">
+    <collision><origin xyz="0.0 -0.07 0.0" rpy="0 0 0"/><geometry><box size="0.13 0.2 0.13"/></geometry></collision>
+  </link>
+  <link name="panda_link3">
+    <collision><origin xyz="0.04 0.0 -0.04" rpy="0 0 0"/><geometry><box size="0.2 0.13 0.2"/></geometry></collision>
+  </link>
+  <link name="panda_link4">
+    <collision><origin xyz="-0.04 0.06 0.0" rpy="0 0 0"/><geometry><box size="0.2 0.18 0.13"/></geometry></collision>
+  </link>
+  <link name="panda_link5">
+    <collision><origin xyz="0.0 0.03 -0.15" rpy="0 0 0"/><geometry><box size="0.13 0.16 0.3"/></geometry></collision>
+  </link>
+  <link name="panda_link6">
+    <collision><origin xyz="0.04 0.0 0.0" rpy="0 0 0"/><geometry><box size="0.2 0.13 0.13"/></geometry></collision>
+  </link>
+  <link name="panda_link7">
+    <collision><origin xyz="0.0 0.0 0.05" rpy="0 0 0"/><geometry><box size="0.1 0.1 0.12"/></geometry></collision>
+  </link>
+  <link name="panda_hand">
+    <collision><origin xyz="0.0 0.0 0.033" rpy="0 0 0"/><geometry><box size="0.07 0.21 0.066"/></geometry></collision>
+  </link>
+
+  <joint name="panda_joint1" type="revolute">
+    <parent link="panda_link0"/><child link="panda_link1"/>
+    <origin xyz="0 0 0.333" rpy="0 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="87" velocity="2.175"/>
+  </joint>
+  <joint name="panda_joint2" type="revolute">
+    <parent link="panda_link1"/><child link="panda_link2"/>
+    <origin xyz="0 0 0" rpy="-1.5707963 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-1.7628" upper="1.7628" effort="87" velocity="2.175"/>
+  </joint>
+  <joint name="panda_joint3" type="revolute">
+    <parent link="panda_link2"/><child link="panda_link3"/>
+    <origin xyz="0 -0.316 0" rpy="1.5707963 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="87" velocity="2.175"/>
+  </joint>
+  <joint name="panda_joint4" type="revolute">
+    <parent link="panda_link3"/><child link="panda_link4"/>
+    <origin xyz="0.0825 0 0" rpy="1.5707963 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-3.0718" upper="-0.0698" effort="87" velocity="2.175"/>
+  </joint>
+  <joint name="panda_joint5" type="revolute">
+    <parent link="panda_link4"/><child link="panda_link5"/>
+    <origin xyz="-0.0825 0.384 0" rpy="-1.5707963 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="12" velocity="2.61"/>
+  </joint>
+  <joint name="panda_joint6" type="revolute">
+    <parent link="panda_link5"/><child link="panda_link6"/>
+    <origin xyz="0 0 0" rpy="1.5707963 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-0.0175" upper="3.7525" effort="12" velocity="2.61"/>
+  </joint>
+  <joint name="panda_joint7" type="revolute">
+    <parent link="panda_link6"/><child link="panda_link7"/>
+    <origin xyz="0.088 0 0" rpy="1.5707963 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="12" velocity="2.61"/>
+  </joint>
+  <joint name="panda_hand_joint" type="fixed">
+    <parent link="panda_link7"/><child link="panda_hand"/>
+    <origin xyz="0 0 0.107" rpy="0 0 -0.7853982"/>
+  </joint>
+</robot>
