@@ -1,33 +1,90 @@
-import { ResourceName, Struct, type RobotClient } from '@viamrobotics/sdk';
+import { ResourceName, Struct, type JsonValue, type RobotClient } from '@viamrobotics/sdk';
 
-const SENSOR_SERVICE = 'viam.component.sensor.v1.SensorService';
-const BASE_TEMPERATURE = 20;
-const TEMPERATURE_STEP = 0.5;
-const TEMPERATURE_STEPS = 10;
-const HUMIDITY = 40;
+import type { View, ViewReply } from '../src/lib/contract';
+import { MAX_PITCH_DEG, MIN_DISTANCE } from '../src/lib/orbit';
 
-/** A robot with one sensor, `resourceName`, whose temperature changes on every `getReadings`. */
+const CAMERA_SERVICE = 'viam.component.camera.v1.CameraService';
+const WIDTH = 640;
+const HEIGHT = 480;
+const HOME: View = { target: [0, 0, 0.75], distance: 3, yaw_deg: 37, pitch_deg: 25, fov_deg: 70 };
+
+/**
+ * A robot with one scene camera, `resourceName`. Frames are drawn with the current view printed
+ * on them. Open the dev host with `?recording` in the URL to see the locked state.
+ */
 export function createFakeRobot(resourceName: string): RobotClient {
-  let calls = 0;
-  const sensorService = {
-    getReadings() {
-      calls += 1;
-      const temperature = BASE_TEMPERATURE + (calls % TEMPERATURE_STEPS) * TEMPERATURE_STEP;
-      return { readings: Struct.fromJson({ temperature, humidity: HUMIDITY }).fields };
+  const recording = new URLSearchParams(location.search).has('recording');
+  let view: View = structuredClone(HOME);
+  const reply = (): ViewReply => ({ ...view, home: HOME, recording });
+
+  const canvas = document.createElement('canvas');
+  canvas.width = WIDTH;
+  canvas.height = HEIGHT;
+  const ctx = canvas.getContext('2d')!;
+
+  async function frame(): Promise<Uint8Array> {
+    const gradient = ctx.createLinearGradient(0, 0, 0, HEIGHT);
+    gradient.addColorStop(0, '#2b3442');
+    gradient.addColorStop(1, '#151a21');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    // a horizon that tilts and slides with the view, so orbiting visibly changes the frame
+    const horizon = HEIGHT / 2 + view.pitch_deg * 4;
+    ctx.strokeStyle = '#8a8f98';
+    ctx.beginPath();
+    ctx.moveTo(0, horizon);
+    ctx.lineTo(WIDTH, horizon);
+    ctx.stroke();
+    const size = 4000 / (view.distance * view.fov_deg);
+    ctx.fillStyle = '#4f78c9';
+    ctx.fillRect(WIDTH / 2 - size / 2 + view.yaw_deg, horizon - size, size, size);
+    ctx.fillStyle = '#e8eaed';
+    ctx.font = '14px monospace';
+    ctx.fillText(
+      `yaw ${view.yaw_deg.toFixed(1)}  pitch ${view.pitch_deg.toFixed(1)}  d ${view.distance.toFixed(2)}`,
+      12,
+      HEIGHT - 14,
+    );
+    const blob = await new Promise<Blob>((resolve) =>
+      canvas.toBlob((b) => resolve(b!), 'image/jpeg', 0.85),
+    );
+    return new Uint8Array(await blob.arrayBuffer());
+  }
+
+  const cameraService = {
+    // CameraClient.getImages reads only `images` and `responseMetadata` off the response
+    async getImages() {
+      return {
+        images: [{ sourceName: resourceName, image: await frame(), mimeType: 'image/jpeg' }],
+      };
+    },
+    // CameraClient.doCommand wraps the command in a real Struct before it reaches the service
+    doCommand(request: { command?: Struct }) {
+      const cmd = (request.command?.toJson() ?? {}) as Record<string, JsonValue>;
+      const { command, ...patch } = cmd;
+      if (command !== 'get_view' && recording) {
+        throw new Error(`camera '${resourceName}' cannot be reconfigured during episode capture`);
+      }
+      if (command === 'reset_view') view = structuredClone(HOME);
+      if (command === 'set_view') {
+        const next = { ...view, ...(patch as Partial<View>) };
+        next.distance = Math.max(MIN_DISTANCE, next.distance);
+        next.pitch_deg = Math.min(MAX_PITCH_DEG, Math.max(-MAX_PITCH_DEG, next.pitch_deg));
+        view = next;
+      }
+      return { result: Struct.fromJson(reply() as unknown as JsonValue) };
     },
   };
 
-  // Single cast at the fake boundary: the host only calls these two methods, and a full
-  // RobotClient needs a live connection.
   return {
     createServiceClient: (service: { typeName: string }) =>
-      service.typeName === SENSOR_SERVICE ? sensorService : undefined,
+      service.typeName === CAMERA_SERVICE ? cameraService : undefined,
     resourceNames: () =>
       Promise.resolve([
         new ResourceName({
           namespace: 'rdk',
           type: 'component',
-          subtype: 'sensor',
+          subtype: 'camera',
           name: resourceName,
         }),
       ]),
