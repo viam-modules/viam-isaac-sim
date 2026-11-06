@@ -42,17 +42,17 @@ machine. They have the same call shapes as `@viamrobotics/svelte-sdk`.
 
 - `useBridge({ reportSize: true })` runs once in `src/main.ts`. It starts the handshake with the
   host and exposes `status`, `resourceName`, and `error` reactively.
-- `createResourceClient<SensorClient>()` returns a handle for the resource this control was
+- `createResourceClient<CameraClient>()` returns a handle for the resource this control was
   rendered for. The host sends that resource's name in the handshake, so the control needs no
   configuration. The handle is `undefined` until the bridge is connected.
-- `createResourceQuery(client, 'getReadings', { refetchInterval: 1000 })` polls a method and
+- `createResourceQuery(client, 'getImages', { refetchInterval: 125 })` polls a method (this control also polls `doCommand` with `get_view` every 2 s) and
   exposes `data`, `error`, `isLoading`, `isFetching`, `isError`, `isSuccess`, and `refetch`.
 - `createResourceMutation(client, 'doCommand')` exposes `mutate`, `mutateAsync`, `isPending`, and
-  `reset`. `mutate` takes the method's arguments as one tuple: `mutate([{ command: 'status' }])`.
+  `reset`. `mutate` takes the method's arguments as one tuple: `mutate([{ command: 'get_view' }])`.
 - `createResourceStream(client, 'getVideo')` collects a server stream into `data`.
 
 Import `@viamrobotics/sdk` with `import type` only. The client class is a type parameter, as in
-`createResourceClient<SensorClient>()`. A value import of a client class pulls the whole SDK
+`createResourceClient<CameraClient>()`. A value import of a client class pulls the whole SDK
 runtime into the artifact and can push it over the size limit.
 
 Errors from the bridge are `BridgeError` instances with a `kind`: `not-connected`, `timeout`,
@@ -95,7 +95,7 @@ Everything the control needs from the machine comes through the hooks above. Eve
   tokens over hand-rolled elements and raw colors, so the control looks like the rest of the app.
 - Show the four states every control has: connecting (`bridge.status`), loading, error, and
   data. An empty data set is a state too.
-- Once data has arrived, keep it on screen. The app polls every second and the host reconnects
+- Once data has arrived, keep it on screen. The app polls constantly and the host reconnects
   now and then, so `isFetching`, a `connecting` bridge, or a failed poll changes an indicator or
   a notice, never the whole view. Placeholders render only before the first data.
 - Tests mock `@viamrobotics/post-message-sdk/svelte` with `vi.mock` and assert the rendered DOM.
@@ -114,7 +114,7 @@ and HMR socket need.
 ## Shipping
 
 The module's `meta.json` declares the built file on the model entry, for example
-`"custom_control": "station_ui/dist/index.html"`, and the module build packages it. The
+`"custom_control": "scene_camera_ui/dist/index.html"`, and the module build packages it. The
 module tarball must contain `meta.json` at its root, because the registry reads the entry from
 that copy. A tarball without it ships a module whose control the app cannot find. The full
 flow, including `viam module reload`, is in the deploy guide this project was scaffolded with

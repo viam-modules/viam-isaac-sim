@@ -339,8 +339,8 @@
       <input
         id="fov"
         type="range"
-        min="20"
-        max="120"
+        min="1"
+        max="179"
         step="1"
         class="flex-1"
         value={fovShown}

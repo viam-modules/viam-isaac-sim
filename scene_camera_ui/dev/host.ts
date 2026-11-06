@@ -1,7 +1,7 @@
 import { createHost } from '@viamrobotics/post-message-sdk/host';
 import { describeRobot, getRobotClient } from './robot';
 
-const resourceName = import.meta.env.VITE_RESOURCE_NAME ?? 'my-sensor';
+const resourceName = import.meta.env.VITE_RESOURCE_NAME ?? 'scene-camera';
 const iframe = document.querySelector('iframe');
 const status = document.querySelector('[role="status"]');
 if (!iframe || !status) throw new Error('host.html needs an iframe and a [role="status"].');

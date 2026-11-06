@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "A custom control for one Viam model, built with Svelte 5 and shipped as one index.html.",
+  "description": "Orbit, pan and zoom control for viam-labs:isaac-sim:scene_camera.",
   "scripts": {
     "dev": "vite --open /dev/host.html",
     "build": "vite build",

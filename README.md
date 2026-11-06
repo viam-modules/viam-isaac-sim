@@ -324,7 +324,8 @@ orientation must be identity. `position` defaults to `[3, 3, 2.5]`, `target` to
 
 The model ships a custom control, so the Viam app shows the camera image. Drag
 it to orbit, shift-drag or two-finger drag to pan, scroll or pinch to zoom, and
-double-click or press Home to return to the home view. The same moves are
+double-click, the Home button or the H or Home key to return to the home view.
+Arrow keys orbit, +/- zoom, and H or the Home key returns home. The same moves are
 available over DoCommand:
 
 | Command | Reply |
