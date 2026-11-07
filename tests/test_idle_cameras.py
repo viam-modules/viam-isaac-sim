@@ -165,8 +165,6 @@ def test_sim_thread_read_refused_during_resume_window(mock_sim):
 
 
 def test_resume_cameras_raises_on_sim_thread(mock_sim):
-    mock_sim.mock = False  # the mock path returns early; main_loop re-reads self.mock only at boot
-
     from isaac_module.sim_manager import IsaacCameraHandle
 
     handle = IsaacCameraHandle(mock_sim, FakeCam())
@@ -174,6 +172,9 @@ def test_resume_cameras_raises_on_sim_thread(mock_sim):
     mock_sim._handles["x"] = ({}, handle)
 
     def task():
+        # the mock path returns early; flip it on the sim thread because
+        # main_loop reads self.mock every iteration and must not see False
+        mock_sim.mock = False
         try:
             mock_sim._resume_cameras(["x"])
         finally:
