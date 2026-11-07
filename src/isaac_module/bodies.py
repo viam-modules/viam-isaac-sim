@@ -585,6 +585,7 @@ class MovementSensorSpec:
     heading_noise_deg: float = 0.0
     velocity_noise_mps: float = 0.0
     include_gravity: bool = True
+    velocity_frame: str = "world"
     seed: int | None = None
 
     @staticmethod
@@ -595,6 +596,9 @@ class MovementSensorSpec:
                 raise ValueError(f"{key} must be finite and non-negative")
             return value
 
+        velocity_frame = attrs.get("velocity_frame", "world")
+        if velocity_frame not in ("world", "base"):
+            raise ValueError(f'velocity_frame must be "world" or "base", got {velocity_frame!r}')
         seed = attrs.get("seed")
         return MovementSensorSpec(
             origin=GeoOrigin.from_attrs(attrs.get("origin")),
@@ -602,6 +606,7 @@ class MovementSensorSpec:
             heading_noise_deg=noise("heading_noise_deg"),
             velocity_noise_mps=noise("velocity_noise_mps"),
             include_gravity=bool(attrs.get("include_gravity", True)),
+            velocity_frame=velocity_frame,
             seed=int(seed) if seed is not None else None,
         )
 
@@ -647,10 +652,15 @@ class MovementSensorHandle:
         heading = (compass_heading_deg(q) + self._noise(spec.heading_noise_deg)) % 360.0
         ox, oy, oz, theta = quat_to_ov(q)
         velocity = tuple(v + self._noise(spec.velocity_noise_mps) for v in state.linear_velocity)
+        reported = velocity
+        if spec.velocity_frame == "base":
+            # Viam base axes: +Y forward (body +X), +X right (body -Y)
+            fwd, left, up = quat_rotate(q_inv, velocity)
+            reported = (-left, fwd, up)
         roll, pitch, yaw = quat_to_rpy(q)
         return {
             "position": {"latitude": lat, "longitude": lon, "altitude_m": alt},
-            "linear_velocity": {"x": velocity[0], "y": velocity[1], "z": velocity[2]},
+            "linear_velocity": dict(zip("xyz", reported)),
             "angular_velocity": {
                 "x": math.degrees(w_body[0]),
                 "y": math.degrees(w_body[1]),

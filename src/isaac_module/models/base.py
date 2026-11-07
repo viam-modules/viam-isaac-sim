@@ -13,6 +13,14 @@ Attributes:
   wheel_base (meters)          - default from asset, else 0.3
   max_linear_mps (float)       - full-power linear speed, default 0.5
   max_angular_rps (float)      - full-power angular speed (rad/s), default 2.0
+  markers (list)               - visual-only colored squares riding on the
+                                 chassis for cameras to find, e.g. fiducials
+                                 for placing objects on the base:
+                                 [{name, color: [r,g,b] 0-1, position:
+                                 [x,y,z] m in the chassis link, size_m
+                                 (0.03), thickness_m (0.002)}]
+  chassis_link (string)        - link the markers ride on, under prim_path
+                                 (the asset's, e.g. "chassis" for jetbot)
 """
 
 import asyncio
@@ -28,7 +36,7 @@ from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
 
 from .. import FAMILY, NAMESPACE
-from ..sim_manager import BaseHandle, SimManager
+from ..sim_manager import BaseHandle, SimManager, parse_markers
 from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
 
@@ -54,7 +62,9 @@ class IsaacBase(Base, EasyResource):
     def validate_config(
         cls, config: ComponentConfig
     ) -> Tuple[Sequence[str], Sequence[str]]:
-        return validate_sim_component(config)
+        deps = validate_sim_component(config)
+        parse_markers(get_attrs(config).get("markers"))
+        return deps
 
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]

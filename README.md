@@ -190,6 +190,7 @@ overrides orientation to aim at a point.
 | `usd_stage` | _empty stage + ground plane_ | USD file or omniverse:// URL to open |
 | `physics_dt` | `1/60` | physics step size in seconds |
 | `rendering_dt` | one render per capture sample | render period in seconds; must be an integer multiple of `physics_dt`. Defaults to `1/capture_rate_hz` when that is a whole number of physics steps (`1/20` for 20 Hz capture at 60 Hz physics), else `physics_dt`. Set it explicitly to `physics_dt` for a smooth livestream |
+| `real_time` | `false` | hold simulator time to wall time so the sim never runs faster than real time. Clients that integrate over the wall clock (odometry, SLAM, navigation) need the sim at 1×; check `status` (`sim_time_s`) against the clock, and lighten rendering if it still runs slow |
 | `capture_rate_hz` | `15` | episode capture rate in simulator time |
 | `boot_timeout_sec` | `300` | Isaac Sim can take a while on first boot |
 | `kit_log_level` | `warning` | kit console verbosity |
@@ -441,6 +442,19 @@ whose FK falls below the configured floor.
 `usd_path`/`prim_path` plus `wheel_joints: [left, right]`, `wheel_radius`,
 `wheel_base`. `max_linear_mps` / `max_angular_rps` scale `SetPower`.
 
+`markers` adds visual-only colored squares (no collision) that ride on the
+base, e.g. fiducials a camera finds to place objects on it. Each is `{name,
+color: [r, g, b] 0-1, position: [x, y, z]}` in meters in the chassis link,
+with optional `size_m` (default 0.03) and `thickness_m` (0.002).
+`chassis_link` names that link under the base prim (`chassis` for `jetbot`).
+
+```json
+"markers": [
+  {"name": "front", "color": [1, 0.85, 0], "position": [0.05, 0, 0.08]},
+  {"name": "rear", "color": [0.9, 0, 0], "position": [-0.05, 0, 0.08]}
+]
+```
+
 ### Floating props, thrusters and movement sensors
 
 Any dynamic prop can float: give it a `mass` and a `buoyancy` block, and put
@@ -530,7 +544,9 @@ the navigation service.
 `world` and `prop` (or `prim_path`) are required. `origin` (`{latitude,
 longitude, altitude_m}`) is the geographic location of the sim world origin,
 so `GetPosition` reports real lat/lon with world +X as east and +Y as north.
-`GetLinearVelocity` is in the world frame (m/s); `GetAngularVelocity` (deg/s)
+`GetLinearVelocity` is in the world frame (m/s), or in Viam base axes (+Y
+forward, +X right, taking the body's +X as forward) with `velocity_frame:
+"base"`, as wheel-odometry consumers such as nav-stack SLAM expect; `GetAngularVelocity` (deg/s)
 and `GetLinearAcceleration` (m/s²) are in the body frame, the latter as
 IMU-style specific force (+9.81 on z at rest; `include_gravity: false` for
 pure motion); `GetCompassHeading` is the bearing of the body's +X axis

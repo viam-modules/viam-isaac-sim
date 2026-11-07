@@ -28,6 +28,12 @@ Attributes:
                                       render per capture sample
                                       (1/capture_rate_hz) when that is a whole
                                       number of physics steps, else physics_dt
+  real_time (bool)                  - hold simulator time to wall time so it
+                                      never runs faster than real time
+                                      (default false: step as fast as the
+                                      GPU allows). Clients that integrate
+                                      over the wall clock, such as odometry
+                                      and SLAM, need the sim at 1x
   capture_rate_hz (float)           - episode capture rate, default 15
   capture_after_render (bool)       - sample episodes after each rendered
                                       frame with synchronous rendering, so
@@ -160,6 +166,7 @@ class IsaacWorld(Generic, EasyResource):
             ),
             capture_rate_hz=float(attrs.get("capture_rate_hz", 15.0)),
             capture_after_render=bool(attrs.get("capture_after_render", False)),
+            real_time=bool(attrs.get("real_time", False)),
             boot_timeout=float(attrs.get("boot_timeout_sec", 300.0)),
             kit_log_level=str(attrs.get("kit_log_level", "warning")),
             livestream_public_ip=str(attrs.get("livestream_public_ip", "")),
