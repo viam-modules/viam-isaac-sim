@@ -80,7 +80,7 @@ def test_articulation_pose_becomes_reset_default_and_current_pose():
             events.append(("reset", None))
 
     _reset_articulation_at_pose(
-        FakeWorld(),
+        FakeWorld().reset,
         FakeArticulation(),
         (-0.235, 0.0, 0.005),
         (1.0, 0.0, 0.0, 0.0),

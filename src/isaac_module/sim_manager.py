@@ -456,6 +456,28 @@ def cameras_to_pause(
     ]
 
 
+def ramp_toward(
+    current: Sequence[float], goal: Sequence[float], max_step: float
+) -> list[float]:
+    """Move toward goal along the straight joint-space segment, so the fastest
+    joint moves at most max_step (radians) and the others scale with it.
+
+    Within max_step of the goal, returns the goal floats exactly, so callers
+    can compare for equality to know the ramp finished."""
+    if len(current) != len(goal):
+        raise ValueError(
+            f"ramp needs matching lengths, got {len(current)} and {len(goal)}"
+        )
+    if max_step <= 0.0:
+        return list(current)
+    deltas = [g - c for c, g in zip(current, goal)]
+    biggest = max((abs(d) for d in deltas), default=0.0)
+    if biggest <= max_step:
+        return list(goal)
+    scale = max_step / biggest
+    return [c + d * scale for c, d in zip(current, deltas)]
+
+
 @dataclass
 class SimConfig:
     mock: bool = False
@@ -557,7 +579,7 @@ def _get_or_add_xform_op(
 
 
 def _reset_articulation_at_pose(
-    world: Any,
+    reset: Callable[[], None],
     articulation: Any,
     position: Sequence[float],
     orientation: Sequence[float] | None,
@@ -566,7 +588,7 @@ def _reset_articulation_at_pose(
     if orientation is not None:
         pose["orientation"] = list(orientation)
     articulation.set_default_state(**pose)
-    world.reset()
+    reset()
     articulation.set_world_pose(**pose)
 
 
@@ -2129,10 +2151,19 @@ class SimManager:
         self._require_booted()
         return self.run(lambda: bool(self.world.is_playing()))
 
+    def _reset_world(self) -> None:
+        """world.reset() returns joints to their defaults; clear arm ramp state
+        first so no ramp step drives toward a pose that no longer exists."""
+        for _, handle in list(self._handles.values()):
+            if isinstance(handle, IsaacArmHandle):
+                handle._target = None
+                handle._commanded = None
+        self.world.reset()
+
     def reset(self) -> None:
         self._require_booted()
         if not self.mock:
-            self.run(lambda: self.world.reset())
+            self.run(self._reset_world)
 
     def sim_time_s(self) -> float:
         """Simulator seconds since boot; safe to call from any thread."""
@@ -2434,7 +2465,7 @@ class SimManager:
 
         art = self._isaac.SingleArticulation(prim_path=prim_path, name=name)
         self.world.scene.add(art)
-        _reset_articulation_at_pose(self.world, art, position, orientation)
+        _reset_articulation_at_pose(self._reset_world, art, position, orientation)
 
         ee = None
         ee_path = attrs.get("end_effector_prim")
@@ -2632,7 +2663,7 @@ class SimManager:
             )
         # Editing collision prims invalidates Isaac's live tensor view. Rebuild
         # it before reading DOF names or limits from the articulation wrapper.
-        self.world.reset()
+        self._reset_world()
         if contact_view is not None:
             contact_view.initialize()
         arm.refresh_dofs()
@@ -2762,7 +2793,7 @@ class SimManager:
         articulation_view._is_initialized = False
         articulation_view._physics_view = None
         articulation_view._default_joints_state = None
-        self.world.reset()
+        self._reset_world()
         arm.refresh_dofs()
         articulation = arm._art
 
@@ -3106,7 +3137,7 @@ class SimManager:
             base_kwargs["orientation"] = [float(v) for v in attrs["orientation_wxyz"]]
         robot = self._isaac.WheeledRobot(**base_kwargs)
         self.world.scene.add(robot)
-        self.world.reset()
+        self._reset_world()
 
         controller = self._isaac.DifferentialController(
             name=f"{name}_controller",
@@ -3599,6 +3630,7 @@ class IsaacArmHandle(ArmHandle):
         )
         self.refresh_dofs()
         self._target: list[float] | None = None
+        self._commanded: list[float] | None = None
         self._nudge: list[float] | None = None
         self._trajectory_callback_name = f"arm_trajectory_{id(self)}"
         self._trajectory: list[tuple[float, Any, tuple[float, ...]]] = []
@@ -3606,13 +3638,17 @@ class IsaacArmHandle(ArmHandle):
         self._trajectory_elapsed_s = 0.0
         self._trajectory_future: Future[None] | None = None
         self._trajectory_attached = False
+        self._ramp_callback_name = f"arm_ramp_{id(self)}"
+        if self._max_joint_rad_s is not None:
+            # Never detached: handles live as long as the module.
+            self._sim.world.add_physics_callback(
+                self._ramp_callback_name, self._on_ramp_step
+            )
 
     def joint_names(self) -> tuple[str, ...]:
         return self._joint_names
 
     def refresh_dofs(self) -> None:
-        import numpy as np
-
         names = list(self._art.dof_names)
         missing = [name for name in self._joint_names if name not in names]
         if missing:
@@ -3620,14 +3656,8 @@ class IsaacArmHandle(ArmHandle):
                 f"arm joints {missing} not found in articulation dof_names: {names}"
             )
         self._joint_indices = [names.index(name) for name in self._joint_names]
-        if self._max_joint_rad_s is not None:
-            self._art._articulation_view.set_max_joint_velocities(
-                np.full((1, len(self._joint_indices)), self._max_joint_rad_s),
-                joint_indices=np.asarray(self._joint_indices),
-            )
-
-    def replace_articulation(self, articulation) -> None:
-        self._art = articulation
+        # No PhysX max-velocity clamp: it fights the stiff drive and slows the
+        # arm far below the limit, so _on_ramp_step limits speed instead.
 
     def _positions_on_sim_thread(self) -> list[float]:
         return [
@@ -3643,24 +3673,45 @@ class IsaacArmHandle(ArmHandle):
             raise ValueError(
                 f"expected {len(self._joint_indices)} joint positions, got {len(positions)}"
             )
+        if not all(math.isfinite(v) for v in positions):
+            raise ValueError("joint targets must be finite")
 
         def _apply():
             self._target = list(positions)
-            self._apply_commanded()
+            if self._max_joint_rad_s is None:
+                self._commanded = list(positions)
+                self._apply_commanded()
+            elif self._commanded is None:
+                # Measured pose includes any active nudge. A nudge stored across
+                # a reset is re-applied in one step on the next command; nudges
+                # are small, so that is negligible.
+                self._commanded = self._positions_on_sim_thread()
 
         self._sim.run(_apply)
 
+    def _on_ramp_step(self, step_size: float) -> None:
+        commanded, target = self._commanded, self._target
+        if commanded is None or target is None or commanded == target:
+            return
+        try:
+            self._commanded = ramp_toward(
+                commanded, target, self._max_joint_rad_s * float(step_size)
+            )
+            self._apply_commanded()
+        except Exception:
+            LOGGER.exception("arm %s ramp step failed", self._prim_path)
+
     def _apply_commanded(self, action: Any = None) -> None:
-        """Drive toward the clean target plus any active nudge offset."""
+        """Drive toward the commanded (ramped) target plus any active nudge offset."""
         import numpy as np
 
-        assert self._target is not None
+        assert self._commanded is not None
         if self._nudge is None and action is not None:
             self._art.apply_action(action)
             return
-        commanded = self._target
+        commanded = self._commanded
         if self._nudge is not None:
-            commanded = [t + n for t, n in zip(self._target, self._nudge)]
+            commanded = [t + n for t, n in zip(self._commanded, self._nudge)]
         self._art.apply_action(
             self._sim._isaac.ArticulationAction(
                 joint_positions=np.asarray(commanded, dtype=float),
@@ -3738,6 +3789,7 @@ class IsaacArmHandle(ArmHandle):
             ):
                 _, action, positions = self._trajectory[self._trajectory_index]
                 self._target = list(positions)
+                self._commanded = list(positions)
                 self._apply_commanded(action)
                 self._trajectory_index += 1
             if self._trajectory_index == len(self._trajectory):
@@ -3836,6 +3888,7 @@ class IsaacArmHandle(ArmHandle):
             # The measured pose includes any active nudge; keep the target clean.
             nudge = self._nudge or [0.0] * len(current)
             self._target = [value - offset for value, offset in zip(current, nudge)]
+            self._commanded = list(self._target)
             if self._trajectory_future is not None:
                 self._trajectory_future.cancel()
             self._trajectory = []
@@ -3896,6 +3949,10 @@ class IsaacArmHandle(ArmHandle):
                 raw_values = values(method_names)
                 if raw_values is not None:
                     result[key] = raw_values
+            if self._max_joint_rad_s is not None:
+                result["max_velocity_rad_s"] = [self._max_joint_rad_s] * len(
+                    self._joint_indices
+                )
             if self._max_joint_acceleration_rad_s2 is not None:
                 result["max_acceleration_rad_s2"] = [
                     self._max_joint_acceleration_rad_s2

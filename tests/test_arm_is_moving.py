@@ -44,12 +44,7 @@ class _FakeArt:
         self.max_velocity_calls.append((values, joint_indices))
 
     def get_joint_max_velocities(self):
-        values = [float("inf")] * len(self.dof_names)
-        if self.max_velocity_calls:
-            configured, indices = self.max_velocity_calls[-1]
-            for value, index in zip(configured[0], indices):
-                values[index] = value
-        return [values]
+        return [[float("inf")] * len(self.dof_names)]
 
     def get_joint_positions(self, joint_indices=None):
         if joint_indices is None:
@@ -183,7 +178,7 @@ def test_max_joint_acceleration_must_be_positive_finite_number(value):
         IsaacArm.validate_config(config)
 
 
-def test_max_joint_velocity_is_applied_to_only_arm_dofs():
+def test_max_joint_velocity_is_reported_for_only_arm_dofs():
     art = _FakeArt([0.0] * 7)
     art.dof_names = list(UR_JOINT_NAMES) + ["finger_joint"]
 
@@ -197,11 +192,7 @@ def test_max_joint_velocity_is_applied_to_only_arm_dofs():
         max_joint_deg_s2=60.0,
     )
 
-    assert len(art.max_velocity_calls) == 1
-    values, joint_indices = art.max_velocity_calls[0]
-    assert values.shape == (1, 6)
-    assert values[0].tolist() == pytest.approx([math.pi] * 6)
-    assert joint_indices.tolist() == list(range(6))
+    assert art.max_velocity_calls == []
     metadata = handle.dynamics_metadata()
     assert metadata["max_velocity_rad_s"] == pytest.approx([math.pi] * 6)
     assert metadata["max_acceleration_rad_s2"] == pytest.approx(
@@ -477,3 +468,16 @@ def test_reports_moving_across_overlapping_moves(world):
         assert not await arm.is_moving()
 
     asyncio.run(scenario())
+
+
+def test_stream_step_never_outruns_velocity_limit(world):
+    # 10 deg/s at 50 Hz is 0.2 deg per tick, below the 2 deg path step
+    arm = IsaacArm.new(
+        _config(
+            "my-arm",
+            {"world": "sim-world", "asset": "ur20", "mock_dof": 6, "max_joint_deg_s": 10.0},
+        ),
+        {},
+    )
+    assert arm._max_step_rad == pytest.approx(math.radians(10.0) / 50.0)
+    assert _arm(world)._max_step_rad == pytest.approx(math.radians(2.0))

@@ -232,9 +232,14 @@ Task-specific placement and randomization belong in caller logic; see
 `position` ([x,y,z] meters), `end_effector_prim` (prim path whose world pose is
 reported by `GetEndPosition`, converted to Viam's orientation-vector
 convention), `move_timeout_sec`, and `arm_model` as a manifest label for custom
-USDs. `max_joint_deg_s` sets one positive finite velocity limit in degrees per
-second on every configured arm joint in the Isaac articulation; gripper joints
-on an integrated articulation are unchanged. `max_joint_deg_s2` sets the
+USDs. `max_joint_deg_s` sets one positive finite speed limit, in degrees per
+second, for every configured arm joint. It limits how fast latched joint
+targets move (`MoveToJointPositions`, `MoveThroughJointPositions`,
+`set_joint_targets_radians`): joints move together along the straight
+joint-space segment, with the fastest joint running at the limit. It is also
+the velocity limit reported to trajectory parameterizers. Streamed trajectories
+follow their own timestamps. Gripper joints on an integrated articulation are
+unchanged. `max_joint_deg_s2` sets the
 positive finite per-joint acceleration limit reported to trajectory
 parameterizers. `is_moving_velocity_threshold_rad_s` sets the per-joint velocity
 noise floor used by `IsMoving`; it defaults to `0.01` rad/s and must be finite
