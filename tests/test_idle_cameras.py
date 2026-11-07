@@ -69,7 +69,12 @@ def test_sim_config_defaults():
 
 
 def test_run_after_next_step_resolves_after_a_loop_without_blocking_drain(mock_sim):
-    fut = mock_sim.run(lambda: mock_sim.run_after_next_step(lambda: 42))
+    def task():
+        fut = mock_sim.run_after_next_step(lambda: 42)
+        assert not fut.done()
+        return fut
+
+    fut = mock_sim.run(task)
     assert isinstance(fut, Future)
     assert fut.result(timeout=5) == 42
 
@@ -115,3 +120,83 @@ def test_pause_tick_skips_episode_cameras(mock_sim):
     mock_sim.run(tick)
     assert idle.paused is True
     assert recording.paused is False
+
+
+def test_paused_read_on_sim_thread_is_deferred_not_immediate(mock_sim):
+    from isaac_module.sim_manager import IsaacCameraHandle
+
+    handle = IsaacCameraHandle(mock_sim, FakeCam())
+    handle.pause()
+
+    def task():
+        fut = handle._read(handle.capture_rgb)
+        assert not fut.done()
+        return fut
+
+    assert mock_sim.run(task).result(timeout=5).shape == (2, 2, 3)
+
+
+def test_two_reads_in_one_iteration_both_wait_for_the_step(mock_sim):
+    from isaac_module.sim_manager import IsaacCameraHandle
+
+    handle = IsaacCameraHandle(mock_sim, FakeCam())
+    handle.pause()
+
+    def task():
+        futs = [handle._read(handle.capture_rgb) for _ in range(2)]
+        assert not any(isinstance(f, Future) is False or f.done() for f in futs)
+        return futs
+
+    for fut in mock_sim.run(task):
+        assert fut.result(timeout=5).shape == (2, 2, 3)
+
+
+def test_sim_thread_read_refused_during_resume_window(mock_sim):
+    from isaac_module.sim_manager import IsaacCameraHandle
+
+    handle = IsaacCameraHandle(mock_sim, FakeCam())
+
+    def task():
+        handle.fresh_from = mock_sim._loop_index + 1
+        handle._get(handle.capture_rgb)
+
+    with pytest.raises(RuntimeError):
+        mock_sim.run(task)
+
+
+def test_resume_cameras_raises_on_sim_thread(mock_sim):
+    mock_sim.mock = False  # the mock path returns early; main_loop re-reads self.mock only at boot
+
+    from isaac_module.sim_manager import IsaacCameraHandle
+
+    handle = IsaacCameraHandle(mock_sim, FakeCam())
+    handle.pause()
+    mock_sim._handles["x"] = ({}, handle)
+
+    def task():
+        try:
+            mock_sim._resume_cameras(["x"])
+        finally:
+            mock_sim.mock = True
+            del mock_sim._handles["x"]
+
+    with pytest.raises(RuntimeError, match="sim thread"):
+        mock_sim.run(task)
+
+
+def test_pause_tick_with_zero_idle_sec_pauses_nothing(mock_sim):
+    from isaac_module.sim_manager import IsaacCameraHandle, SimConfig
+
+    idle = IsaacCameraHandle(mock_sim, FakeCam())
+    idle.last_read = 0.0
+
+    def tick():
+        mock_sim.cfg = SimConfig(mock=True, camera_idle_sec=0.0)
+        mock_sim._handles["idle"] = ({}, idle)
+        try:
+            mock_sim._pause_idle_cameras()
+        finally:
+            del mock_sim._handles["idle"]
+
+    mock_sim.run(tick)
+    assert idle.paused is False
