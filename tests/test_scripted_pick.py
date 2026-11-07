@@ -45,13 +45,13 @@ class FakeWorld:
         if command["command"] == "status":
             self.sim_time += 0.25
             return {"sim_time": self.sim_time, "playing": self.playing}
+        if command["command"] == "mark_episode_stage" and not self.playing:
+            raise RuntimeError("mark_episode_stage requires the simulation to be playing")
         self.commands.append(command)
         if command["command"] == "pause":
             self.playing = False
         elif command["command"] == "play":
             self.playing = True
-        elif command["command"] == "mark_episode_stage" and not self.playing:
-            raise RuntimeError("mark_episode_stage requires the simulation to be playing")
         if self.events is not None:
             self.events.append(f"command:{command['command']}")
         if command["command"] == "set_prop_pose":
