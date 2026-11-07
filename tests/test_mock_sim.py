@@ -70,6 +70,14 @@ def test_world_boots_and_status(world):
     status = asyncio.run(world.do_command({"command": "status"}))
     assert status["booted"] is True
     assert status["mock"] is True
+    assert set(status["perf"]) == {
+        "real_time_factor",
+        "step_ms",
+        "loop_ms",
+        "render_hz",
+    }
+    assert status["settings"]["real_time"] is False
+    assert status["settings"]["livestream"] is True
 
 
 def test_mock_sim_clock_advances(sim):
