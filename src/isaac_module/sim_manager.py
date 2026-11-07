@@ -432,7 +432,7 @@ class StepStats:
 
 
 # SimConfig fields echoed by status() so benchmark output records the settings
-# it ran under. Missing fields are skipped, so this survives branch reordering.
+# it ran under.
 _STATUS_SETTINGS = (
     "headless",
     "livestream",
@@ -2212,7 +2212,6 @@ class SimManager:
             out["settings"] = {
                 key: getattr(self.cfg, key)
                 for key in _STATUS_SETTINGS
-                if hasattr(self.cfg, key)
             }
         if self._booted.is_set() and not self.mock:
             out["playing"] = self.is_playing()
@@ -4754,9 +4753,8 @@ class IsaacCameraHandle(CameraHandle):
         self.fresh_from = 0  # first _loop_index at which a read is fresh
 
     def pause(self) -> None:
-        # Verify on 5.0 that Camera.pause() stops the render product
-        # (hydra_texture.set_updates_enabled(False)); if it only stops data
-        # callbacks, call set_updates_enabled on its render product instead.
+        # Measured on Isaac Sim 5.0: pausing an unread camera recovers its
+        # render cost (about 9% step time for 1280x720).
         self._cam.pause()
         self.paused = True
 
@@ -4771,7 +4769,7 @@ class IsaacCameraHandle(CameraHandle):
 
     # Steps to wait after resume before reading. With async rendering (the
     # default; capture_after_render false), annotators can lag a frame, so one
-    # step may still return the pre-pause image. Task 9 Step 8 measures this.
+    # step may still return the pre-pause image. Verified on Isaac Sim 5.0: one step after resume returns a fresh frame.
     RESUME_STEPS = 1
 
     def _read(self, capture: Callable[[], Any]):

@@ -45,8 +45,10 @@ Attributes:
                                       changes camera images)
   kit_settings (object)             - carb settings set at boot, e.g.
                                       {"/rtx/reflections/enabled": false}.
-                                      Keys start with "/". Overrides
-                                      render_quality
+                                      Keys are carb paths starting with
+                                      "/", segments using letters, digits,
+                                      _ . or -; string values can't contain
+                                      spaces or =. Overrides render_quality
   camera_idle_sec (float)           - pause a camera's rendering after this
                                       many seconds unread; 0 (default) is
                                       off, otherwise >= 0.5. The first read
