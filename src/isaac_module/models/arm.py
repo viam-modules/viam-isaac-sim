@@ -28,7 +28,9 @@ Attributes:
                                      targets; sparse waypoint pairs are
                                      linearly interpolated so drives can
                                      actually track them (default 2.0,
-                                     range (0, 30])
+                                     range (0, 30]); when max_joint_deg_s is
+                                     set, capped at max_joint_deg_s /
+                                     robot_control_freq_hz
   kinematics_url (string)          - where to fetch the kinematics file served
                                      by GetKinematics (.json = SVA, .urdf =
                                      URDF; file:// URLs work). Known assets with

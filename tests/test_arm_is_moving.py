@@ -44,12 +44,7 @@ class _FakeArt:
         self.max_velocity_calls.append((values, joint_indices))
 
     def get_joint_max_velocities(self):
-        values = [float("inf")] * len(self.dof_names)
-        if self.max_velocity_calls:
-            configured, indices = self.max_velocity_calls[-1]
-            for value, index in zip(configured[0], indices):
-                values[index] = value
-        return [values]
+        return [[float("inf")] * len(self.dof_names)]
 
     def get_joint_positions(self, joint_indices=None):
         if joint_indices is None:
