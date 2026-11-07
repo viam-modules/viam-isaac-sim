@@ -210,16 +210,15 @@ class IsaacArm(Arm, EasyResource):
             )
         self._max_step_rad = math.radians(step_deg)
         self._attrs = attrs
-        limit_deg_s = _max_joint_deg_s(attrs, config.name)
-        if limit_deg_s is not None:
+        max_joint_deg_s = _max_joint_deg_s(attrs, config.name)
+        if max_joint_deg_s is not None:
             # Don't stream targets faster than the handle ramps them.
             self._max_step_rad = min(
-                self._max_step_rad, math.radians(limit_deg_s) * self._control_period
+                self._max_step_rad, math.radians(max_joint_deg_s) * self._control_period
             )
         attrs["is_moving_velocity_threshold_rad_s"] = (
             _is_moving_velocity_threshold(attrs, config.name)
         )
-        max_joint_deg_s = _max_joint_deg_s(attrs, config.name)
         if max_joint_deg_s is not None:
             attrs["max_joint_deg_s"] = max_joint_deg_s
         max_joint_deg_s2 = _max_joint_deg_s2(attrs, config.name)
