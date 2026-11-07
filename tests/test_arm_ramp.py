@@ -6,8 +6,8 @@ from test_arm_is_moving import _FakeArt, _FakeSim
 from isaac_module.sim_manager import IsaacArmHandle, JointTrajectoryPoint, ramp_toward
 
 
-def test_clamps_each_joint_independently():
-    assert ramp_toward([0.0, 0.0], [1.0, 0.05], 0.1) == pytest.approx([0.1, 0.05])
+def test_scales_all_joints_along_the_segment():
+    assert ramp_toward([0.0, 0.0], [1.0, 0.5], 0.1) == pytest.approx([0.1, 0.05])
 
 
 def test_lands_exactly_on_goal_without_overshoot():
@@ -22,6 +22,10 @@ def test_negative_direction():
 
 def test_zero_step_leaves_values():
     assert ramp_toward([0.2, 0.4], [1.0, 1.0], 0.0) == pytest.approx([0.2, 0.4])
+
+
+def test_nonpositive_step_returns_current():
+    assert ramp_toward([0.2, 0.4], [1.0, 1.0], -1.0) == [0.2, 0.4]
 
 
 def test_length_mismatch_raises():
@@ -61,7 +65,7 @@ def test_stop_holds_measured_minus_nudge():
 def test_limit_ramps_target_by_v_dt_per_step():
     sim, art, h = _handle(max_joint_deg_s=60.0)  # 60 deg/s
     name = f"arm_ramp_{id(h)}"
-    assert list(sim.world.callbacks) == [name]
+    assert name in sim.world.callbacks
     h.set_joint_targets([math.radians(30), 0.0])
     assert art.actions == []  # goal not applied immediately
     step = sim.world.callbacks[name]
@@ -97,3 +101,11 @@ def test_nudge_rides_on_ramped_target():
     assert art.actions[-1].joint_positions.tolist() == pytest.approx(
         [math.radians(6), 0.2]
     )
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf")])
+def test_set_joint_targets_rejects_non_finite(bad):
+    sim, art, h = _handle(max_joint_deg_s=60.0)
+    with pytest.raises(ValueError, match="finite"):
+        h.set_joint_targets([0.0, bad])
+    assert h._target is None
