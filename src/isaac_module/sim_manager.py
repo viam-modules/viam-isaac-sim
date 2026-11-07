@@ -456,6 +456,24 @@ def cameras_to_pause(
     ]
 
 
+def ramp_toward(
+    current: Sequence[float], goal: Sequence[float], max_step: float
+) -> list[float]:
+    """Move each joint toward its goal by at most max_step (radians).
+
+    A joint within max_step lands exactly on its goal, so callers can compare
+    for equality to know the ramp finished."""
+    if len(current) != len(goal):
+        raise ValueError(
+            f"ramp needs matching lengths, got {len(current)} and {len(goal)}"
+        )
+    out = []
+    for c, g in zip(current, goal):
+        delta = g - c
+        out.append(g if abs(delta) <= max_step else c + math.copysign(max_step, delta))
+    return out
+
+
 @dataclass
 class SimConfig:
     mock: bool = False
