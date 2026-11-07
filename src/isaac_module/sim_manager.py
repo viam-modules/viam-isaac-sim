@@ -3731,6 +3731,9 @@ class IsaacArmHandle(ArmHandle):
         self._target: list[float] | None = (
             list(initial_target) if initial_target is not None else None
         )
+        self._commanded: list[float] | None = (
+            list(self._target) if self._target is not None else None
+        )
         self._nudge: list[float] | None = None
         self._trajectory_callback_name = f"arm_trajectory_{id(self)}"
         self._trajectory: list[tuple[float, Any, tuple[float, ...]]] = []
@@ -3758,9 +3761,6 @@ class IsaacArmHandle(ArmHandle):
                 joint_indices=np.asarray(self._joint_indices),
             )
 
-    def replace_articulation(self, articulation) -> None:
-        self._art = articulation
-
     def _positions_on_sim_thread(self) -> list[float]:
         return [
             float(v)
@@ -3778,6 +3778,7 @@ class IsaacArmHandle(ArmHandle):
 
         def _apply():
             self._target = list(positions)
+            self._commanded = list(positions)
             self._apply_commanded()
 
         self._sim.run(_apply)
@@ -3786,13 +3787,13 @@ class IsaacArmHandle(ArmHandle):
         """Drive toward the clean target plus any active nudge offset."""
         import numpy as np
 
-        assert self._target is not None
+        assert self._commanded is not None
         if self._nudge is None and action is not None:
             self._art.apply_action(action)
             return
-        commanded = self._target
+        commanded = self._commanded
         if self._nudge is not None:
-            commanded = [t + n for t, n in zip(self._target, self._nudge)]
+            commanded = [t + n for t, n in zip(self._commanded, self._nudge)]
         self._art.apply_action(
             self._sim._isaac.ArticulationAction(
                 joint_positions=np.asarray(commanded, dtype=float),
@@ -3870,6 +3871,7 @@ class IsaacArmHandle(ArmHandle):
             ):
                 _, action, positions = self._trajectory[self._trajectory_index]
                 self._target = list(positions)
+                self._commanded = list(positions)
                 self._apply_commanded(action)
                 self._trajectory_index += 1
             if self._trajectory_index == len(self._trajectory):
@@ -3968,6 +3970,7 @@ class IsaacArmHandle(ArmHandle):
             # The measured pose includes any active nudge; keep the target clean.
             nudge = self._nudge or [0.0] * len(current)
             self._target = [value - offset for value, offset in zip(current, nudge)]
+            self._commanded = list(self._target)
             if self._trajectory_future is not None:
                 self._trajectory_future.cancel()
             self._trajectory = []
