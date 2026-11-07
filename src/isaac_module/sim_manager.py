@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -222,6 +222,46 @@ def validate_rendering_dt(physics_dt: float, rendering_dt: float) -> None:
         )
 
 
+KitValue = bool | int | float | str
+
+
+def _kit_value(value: KitValue) -> KitValue:
+    """Viam structs turn ints into floats; Kit int settings want ints back."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+def validate_kit_settings(value: Any) -> dict[str, KitValue]:
+    """Raise ValueError unless value is {"/carb/path": bool|number|string}."""
+    if not isinstance(value, dict):
+        raise ValueError('kit_settings must be an object of {"/setting/path": value}')
+    for path, v in value.items():
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise ValueError(f"kit_settings key {path!r} must start with '/'")
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)) and math.isfinite(v):
+            continue
+        if isinstance(v, str) and v and not any(c.isspace() or c == "=" for c in v):
+            continue
+        raise ValueError(
+            f"kit_settings[{path!r}] must be a bool, finite number, or a string "
+            "without whitespace or '='"
+        )
+    return dict(value)
+
+
+def kit_settings_argv(settings: Mapping[str, KitValue]) -> list[str]:
+    """Kit command-line overrides; some RTX settings only apply at startup."""
+    out = []
+    for path, value in settings.items():
+        value = _kit_value(value)
+        text = ("true" if value else "false") if isinstance(value, bool) else str(value)
+        out.append(f"--{path}={text}")
+    return out
+
+
 def parse_markers(raw: Any) -> list[dict[str, Any]]:
     """Validate a base's ``markers``: visual-only colored squares riding on
     the base for cameras to find (fiducials). Each is
@@ -380,6 +420,9 @@ class SimConfig:
     # of lines at info, and viam-server records the module's stderr as
     # error-level logs, so default to warning.
     kit_log_level: str = "warning"
+    # carb settings applied at boot: {"/rtx/...": value}. Passed on kit's
+    # command line and set again after the stage opens (see _apply_kit_settings).
+    kit_settings: dict[str, Any] = field(default_factory=dict)
     # add_default_ground_plane loads the Grid env USD, which bundles floor
     # collider AND the lighting rig; when false, we add fallback lights
     isaac_default_environment: bool = True
@@ -1571,6 +1614,9 @@ class SimManager:
                 ]
             )
 
+        kit_settings = dict(cfg.kit_settings)
+        sys.argv.extend(kit_settings_argv(kit_settings))
+
         streaming = cfg.livestream and cfg.headless
         launch: dict[str, Any] = {"headless": cfg.headless}
         if streaming:
@@ -1653,6 +1699,7 @@ class SimManager:
             rendering_dt=rendering_dt,
             stage_units_in_meters=1.0,
         )
+        self._apply_kit_settings(kit_settings)
         if cfg.dome_light:
             import omni.usd
             from pxr import Sdf, UsdLux
@@ -1710,6 +1757,24 @@ class SimManager:
         )
         self.world.scene.add(seabed)
         LOGGER.info("water surface at z=%.2f m, seabed %.1f m below", level, depth)
+
+    def _apply_kit_settings(self, settings: Mapping[str, KitValue]) -> None:
+        """Set again after the stage opens, since stage render settings can
+        override startup values, then log what carb actually holds."""
+        if not settings:
+            return
+        try:
+            import carb.settings
+
+            carb_settings = carb.settings.get_settings()
+            for path, value in settings.items():
+                carb_settings.set(path, _kit_value(value))
+            LOGGER.info(
+                "kit settings applied (read back): %s",
+                {path: carb_settings.get(path) for path in settings},
+            )
+        except Exception:
+            LOGGER.exception("could not apply kit_settings; continuing")
 
     def _add_fallback_lighting(self) -> None:
         from pxr import Sdf, UsdLux
