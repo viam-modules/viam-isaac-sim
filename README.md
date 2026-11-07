@@ -183,7 +183,7 @@ overrides orientation to aim at a point.
 |---|---|---|
 | `mock` | `false` | run without Isaac Sim installed (development/testing) |
 | `headless` | `true` | no local GUI window |
-| `livestream` | `true` | WebRTC viewer at `http://<host>:8211/streaming/webrtc-client` (headless only) |
+| `livestream` | `true` | WebRTC viewer at `http://<host>:8211/streaming/webrtc-client` (headless only). Without a livestream, headless runs stop rendering the viewport (about 8% faster) |
 | `livestream_public_ip` | _auto-detected_ | IP advertised to streaming clients |
 | `livestream_width` / `livestream_height` | `1280` / `720` | streamed resolution |
 | `dome_light` | `false` | add a neutral dome light at `/World/DomeLight` with intensity 1000 |
@@ -194,7 +194,18 @@ overrides orientation to aim at a point.
 | `capture_rate_hz` | `15` | episode capture rate in simulator time |
 | `boot_timeout_sec` | `300` | Isaac Sim can take a while on first boot |
 | `kit_log_level` | `warning` | kit console verbosity |
+| `render_quality` | `"default"` | `"performance"` applies the rendering settings from Isaac Lab v2.2.0's performance.kit: reflections, translucency, ambient occlusion and DLSS frame generation off; indirect diffuse on; non-sampled direct lighting; DLSS in performance mode. It mainly speeds up the viewport: about 10% faster with `livestream` on, and no measurable gain headless without a livestream, where the viewport is already off. Camera images change slightly, so don't switch it mid-dataset |
+| `kit_settings` | `{}` | carb settings applied at boot, e.g. `{"/rtx/reflections/enabled": false}`. Keys are carb paths starting with `/` whose segments use letters, digits, `_`, `.` or `-`; values are bools, numbers or strings (strings can't contain spaces or `=`), and override `render_quality`. Each is logged with its value before and after, and unknown paths are warned about |
+| `camera_idle_sec` | `0` (off) | `0` or at least `0.5`. Stop rendering a camera nobody has read for this many seconds. An unread 1280×720 camera costs about 9% step time. The next read waits for a fresh rendered frame. Cameras recording an episode never pause, and paused cameras are resumed before an episode starts |
 | `water` | _none_ | `{"level_m": 0, "size_m": 400, "depth_m": 10, "color": [r,g,b]}`: a flat water surface for floating props. Replaces the default ground plane with a visual surface (no collision) at `level_m` and a seabed collider `depth_m` below it |
+
+`{"command": "status"}` also reports `perf`, a rolling 2-second window of `real_time_factor`, `step_ms`, `loop_ms` and `render_hz`, plus `perf_totals` (cumulative counters since boot) and the effective `settings`. To measure a change, use `examples/bench_sweep.py`. It records an episode on both cameras while sweeping the arm's base joint for a fixed time, and prints whole-run averages over playing loops:
+
+```sh
+python examples/bench_sweep.py <machine-address> runs/perf/my-run
+```
+
+`examples/batch_picks.py --perf` adds the same whole-run block to a scripted-pick batch.
 
 The world supports low-level `DoCommand` operations for pre-created props. Use
 `set_prop_pose` to place a prop at a specific world pose:

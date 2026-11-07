@@ -15,11 +15,13 @@ import hashlib
 import math
 import os
 import queue
+import re
 import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections import deque
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -217,6 +219,77 @@ def validate_rendering_dt(physics_dt: float, rendering_dt: float) -> None:
         )
 
 
+KitValue = bool | int | float | str
+
+
+def _kit_value(value: KitValue) -> KitValue:
+    """Viam structs turn ints into floats; Kit int settings want ints back."""
+    if isinstance(value, float) and value.is_integer() and abs(value) < 2**53:
+        return int(value)
+    return value
+
+
+def validate_kit_settings(value: Any) -> dict[str, KitValue]:
+    """Raise ValueError unless value is {"/carb/path": bool|number|string}."""
+    if not isinstance(value, dict):
+        raise ValueError('kit_settings must be an object of {"/setting/path": value}')
+    for path, v in value.items():
+        if not isinstance(path, str) or not re.fullmatch(r"(/[A-Za-z0-9_.\-]+)+", path):
+            raise ValueError(
+                f"kit_settings key {path!r} must look like '/rtx/some-setting'"
+            )
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)) and math.isfinite(v):
+            continue
+        if isinstance(v, str) and v and not any(c.isspace() or c == "=" for c in v):
+            continue
+        raise ValueError(
+            f"kit_settings[{path!r}] must be a bool, finite number, or a string "
+            "without whitespace or '='"
+        )
+    return dict(value)
+
+
+def kit_settings_argv(settings: Mapping[str, KitValue]) -> list[str]:
+    """Kit command-line overrides; some RTX settings only apply at startup."""
+    out = []
+    for path, value in settings.items():
+        value = _kit_value(value)
+        text = ("true" if value else "false") if isinstance(value, bool) else str(value)
+        out.append(f"--{path}={text}")
+    return out
+
+
+# Isaac Lab's apps/rendering_modes/performance.kit (tag v2.2.0; removed from
+# main), the seven keys we take. Opt-in: these change camera images, and
+# policies are trained on those images.
+RENDER_QUALITY_PRESETS: dict[str, dict[str, KitValue]] = {
+    "default": {},
+    "performance": {
+        "/rtx/reflections/enabled": False,
+        "/rtx/translucency/enabled": False,
+        "/rtx/indirectDiffuse/enabled": True,
+        "/rtx/ambientOcclusion/enabled": False,
+        "/rtx/directLighting/sampledLighting/enabled": False,
+        "/rtx/post/dlss/execMode": 0,
+        "/rtx-transient/dlssg/enabled": False,
+    },
+}
+
+
+def kit_settings_for(
+    render_quality: str, kit_settings: Mapping[str, KitValue]
+) -> dict[str, KitValue]:
+    """The render_quality preset with the user's kit_settings on top."""
+    if render_quality not in RENDER_QUALITY_PRESETS:
+        raise ValueError(
+            f"render_quality must be one of {sorted(RENDER_QUALITY_PRESETS)}, "
+            f"not {render_quality!r}"
+        )
+    return {**RENDER_QUALITY_PRESETS[render_quality], **kit_settings}
+
+
 def parse_markers(raw: Any) -> list[dict[str, Any]]:
     """Validate a base's ``markers``: visual-only colored squares riding on
     the base for cameras to find (fiducials). Each is
@@ -285,6 +358,104 @@ class RealTimePacer:
             self._deadline = now
 
 
+class StepStats:
+    """Rolling window of sim-loop timings, reported as status()["perf"].
+
+    record() runs on the sim thread; snapshot() runs on any thread."""
+
+    def __init__(
+        self, window_s: float = 2.0, clock: Callable[[], float] = time.monotonic
+    ) -> None:
+        self._window_s = window_s
+        self._clock = clock
+        self._lock = threading.Lock()
+        # (recorded_at, step_s, loop_s, sim_dt)
+        self._samples: deque[tuple[float, float, float, float]] = deque()
+        # cumulative since boot; never pruned
+        self._loops = 0
+        self._loop_s = 0.0
+        self._step_s = 0.0
+        self._sim_s = 0.0
+        self._playing_loop_s = 0.0
+        self._playing_loops = 0
+        self._playing_step_s = 0.0
+
+    def record(self, step_s: float, loop_s: float, sim_dt: float) -> None:
+        now = self._clock()
+        with self._lock:
+            self._samples.append((now, step_s, loop_s, sim_dt))
+            self._loops += 1
+            self._loop_s += loop_s
+            self._step_s += step_s
+            self._sim_s += sim_dt
+            if sim_dt > 0:
+                self._playing_loop_s += loop_s
+                self._playing_loops += 1
+                self._playing_step_s += step_s
+            while now - self._samples[0][0] > self._window_s:
+                self._samples.popleft()
+
+    def totals(self) -> dict[str, float]:
+        with self._lock:
+            return {
+                "loops": self._loops,
+                "loop_s": self._loop_s,
+                "step_s": self._step_s,
+                "sim_s": self._sim_s,
+                "playing_loop_s": self._playing_loop_s,
+                "playing_loops": self._playing_loops,
+                "playing_step_s": self._playing_step_s,
+            }
+
+    def snapshot(self) -> dict[str, float]:
+        with self._lock:
+            samples = list(self._samples)
+        n = len(samples)
+        wall = sum(s[2] for s in samples)
+        if n == 0 or wall <= 0.0:
+            return {
+                "real_time_factor": 0.0,
+                "step_ms": 0.0,
+                "loop_ms": 0.0,
+                "render_hz": 0.0,
+            }
+        return {
+            "real_time_factor": sum(s[3] for s in samples) / wall,
+            "step_ms": 1000.0 * sum(s[1] for s in samples) / n,
+            "loop_ms": 1000.0 * wall / n,
+            "render_hz": n / wall,
+        }
+
+
+# SimConfig fields echoed by status() so benchmark output records the settings
+# it ran under.
+_STATUS_SETTINGS = (
+    "headless",
+    "livestream",
+    "real_time",
+    "render_quality",
+    "kit_settings",
+    "camera_idle_sec",
+)
+
+
+def cameras_to_pause(
+    last_reads: Mapping[str, float],
+    paused: set[str],
+    protected: set[str],
+    now: float,
+    idle_sec: float,
+) -> list[str]:
+    """Cameras unread for idle_sec that aren't already paused or recording."""
+    if idle_sec <= 0.0:
+        return []
+    return [
+        name
+        for name, last in last_reads.items()
+        if name not in paused and name not in protected and now - last > idle_sec
+    ]
+
+
 @dataclass
 class SimConfig:
     mock: bool = False
@@ -322,6 +493,16 @@ class SimConfig:
     # of lines at info, and viam-server records the module's stderr as
     # error-level logs, so default to warning.
     kit_log_level: str = "warning"
+    # carb settings applied at boot: {"/rtx/...": value}. Passed on kit's
+    # command line and set again after the stage opens (see _apply_kit_settings).
+    kit_settings: dict[str, Any] = field(default_factory=dict)
+    # "default" | "performance"; see RENDER_QUALITY_PRESETS
+    render_quality: str = "default"
+    # pause a camera's rendering after this many seconds without a read;
+    # 0 disables; otherwise >= 0.5 so a just-resumed camera isn't re-paused
+    # before an episode's first sample. The first read after a pause waits
+    # for a fresh rendered frame.
+    camera_idle_sec: float = 0.0
     # add_default_ground_plane loads the Grid env USD, which bundles floor
     # collider AND the lighting rig; when false, we add fallback lights
     isaac_default_environment: bool = True
@@ -555,7 +736,11 @@ class SimManager:
         # run after each rendered frame (e.g. lidar scan polling); physics
         # step callbacks fire per substep, which is too often for sensors
         self._render_callbacks: dict[str, Callable[[], None]] = {}
+        # [steps_remaining, fn, future]
+        self._after_step: list[list[Any]] = []
+        self._loop_index = 0  # main_loop iterations started
         self._mock_sim_time_s = 0.0
+        self._stats = StepStats()
         # component name -> (spawn attrs, handle). viam-server rebuilds
         # resources on config change, but prims can't be re-spawned without
         # restarting kit, so handles are cached per component name.
@@ -644,6 +829,7 @@ class SimManager:
         self._sim_thread_id = threading.get_ident()
 
         while not self._stop.is_set() and not self._boot_requested.wait(timeout=0.1):
+            self._loop_index += 1
             self._drain_tasks()
 
         if self._stop.is_set():
@@ -662,6 +848,8 @@ class SimManager:
         pacer = RealTimePacer() if self.cfg and self.cfg.real_time and not self.mock else None
         step_dt = self.cfg.resolved_rendering_dt() if pacer else 0.0
         while not self._stop.is_set():
+            loop_start = time.perf_counter()
+            self._loop_index += 1
             self._drain_tasks()
             now = time.monotonic()
             dt = now - last
@@ -673,19 +861,29 @@ class SimManager:
                 # wall time elapsed since boot.
                 self._mock_sim_time_s += dt
                 time.sleep(0.01)
+                self._flush_after_step()
+                step_s, sim_dt = 0.0, dt
             else:
                 # One rendered frame plus rendering_dt / physics_dt physics
                 # substeps; physics callbacks fire once per substep.
+                sim_before = self.world.current_time
+                step_start = time.perf_counter()
                 self.world.step(render=True)
+                step_s = time.perf_counter() - step_start
+                # defensive clamp: a time rewind must never show up as negative sim time
+                sim_dt = max(0.0, self.world.current_time - sim_before)
                 for render_cb in list(self._render_callbacks.values()):
                     try:
                         render_cb()
                     except Exception:
                         LOGGER.exception("render callback failed")
+                self._flush_after_step()
+                self._pause_idle_cameras()
                 if self._capture_after_render_active:
                     self._capture_after_render()
                 if pacer is not None:
                     pacer.after_step(step_dt)
+            self._stats.record(step_s, time.perf_counter() - loop_start, sim_dt)
 
         if self._episode_id is not None:
             try:
@@ -710,6 +908,91 @@ class SimManager:
                     fut.set_result(fn())
                 except BaseException as e:
                     fut.set_exception(e)
+
+    def run_after_next_step(self, fn: Callable[[], Any], steps: int = 1) -> Future:
+        """Sim thread only: run fn after `steps` more world.steps and resolve
+        the returned future with its result. Lets a task wait for a render
+        without blocking the loop that renders."""
+        fut: Future = Future()
+        self._after_step.append([max(1, steps), fn, fut])
+        return fut
+
+    def _flush_after_step(self) -> None:
+        # Futures still queued when the loop stops are never resolved; their
+        # callers fall back to their own timeout.
+        if not self._after_step:
+            return
+        due, waiting = [], []
+        for entry in self._after_step:
+            entry[0] -= 1
+            (due if entry[0] <= 0 else waiting).append(entry)
+        self._after_step = waiting
+        for _, fn, fut in due:
+            if fut.set_running_or_notify_cancel():
+                try:
+                    fut.set_result(fn())
+                except BaseException as e:
+                    fut.set_exception(e)
+
+    def _pause_idle_cameras(self) -> None:
+        cfg = self.cfg
+        if cfg is None or cfg.camera_idle_sec <= 0.0:
+            return
+        cameras = {
+            name: handle
+            # list(): viam threads add handles while this runs on the sim thread
+            for name, (_, handle) in list(self._handles.items())
+            if isinstance(handle, IsaacCameraHandle)
+        }
+        protected = {
+            name
+            for name, handle in cameras.items()
+            if self._capture_handles is not None and handle in self._capture_handles
+        }
+        for name in cameras_to_pause(
+            {name: h.last_read for name, h in cameras.items()},
+            {name for name, h in cameras.items() if h.paused},
+            protected,
+            time.monotonic(),
+            cfg.camera_idle_sec,
+        ):
+            try:
+                cameras[name].pause()
+            except Exception:
+                LOGGER.exception("could not pause idle camera %s", name)
+
+    def _resume_cameras(self, names: Sequence[str]) -> None:
+        """Off the sim thread: resume any paused cameras among names and wait
+        until they have rendered, so an episode's first sample is fresh."""
+        def paused_handles() -> list["IsaacCameraHandle"]:
+            found = []
+            for name in names:
+                entry = self._handles.get(name) if name else None
+                handle = entry[1] if entry else None
+                if isinstance(handle, IsaacCameraHandle) and handle.paused:
+                    found.append(handle)
+            return found
+
+        if threading.get_ident() == self._sim_thread_id:
+            # waiting here would block the loop that must render the frame
+            if paused_handles():
+                raise RuntimeError("cannot resume cameras from the sim thread")
+            return
+
+        def resume() -> Future | None:
+            paused = paused_handles()
+            if not paused:
+                return None
+            for handle in paused:
+                handle.resume()
+                handle.fresh_from = self._loop_index + IsaacCameraHandle.RESUME_STEPS
+            return self.run_after_next_step(
+                lambda: None, steps=IsaacCameraHandle.RESUME_STEPS
+            )
+
+        pending = self.run(resume)
+        if pending is not None:
+            pending.result(timeout=30.0)
 
     def run(self, fn: Callable[[], Any], timeout: float = 30.0) -> Any:
         """Run fn on the sim thread and return its result."""
@@ -1130,6 +1413,9 @@ class SimManager:
                 }
             return result
 
+        self._resume_cameras(
+            [fixed_camera_name, wrist_camera_name, fixed_camera_2_name]
+        )
         return self.run(_start, timeout=120.0)
 
     def active_episode_stage_frame_count(self) -> int | None:
@@ -1449,6 +1735,9 @@ class SimManager:
                 ]
             )
 
+        kit_settings = kit_settings_for(cfg.render_quality, cfg.kit_settings)
+        sys.argv.extend(kit_settings_argv(kit_settings))
+
         streaming = cfg.livestream and cfg.headless
         launch: dict[str, Any] = {"headless": cfg.headless}
         if streaming:
@@ -1531,6 +1820,7 @@ class SimManager:
             rendering_dt=rendering_dt,
             stage_units_in_meters=1.0,
         )
+        self._apply_kit_settings(kit_settings)
         if cfg.dome_light:
             import omni.usd
             from pxr import Sdf, UsdLux
@@ -1549,7 +1839,10 @@ class SimManager:
                 self._add_fallback_lighting()
         for prop in self._prop_specs.values():
             self._spawn_prop(prop)
+        if cfg.headless and not cfg.livestream:
+            self._disable_viewport()
         self.world.reset()
+        self._log_physics_settings()
         LOGGER.info("isaac sim world ready")
 
     def _spawn_water(self, water: dict[str, Any]) -> None:
@@ -1588,6 +1881,72 @@ class SimManager:
         )
         self.world.scene.add(seabed)
         LOGGER.info("water surface at z=%.2f m, seabed %.1f m below", level, depth)
+
+    def _log_physics_settings(self) -> None:
+        """Logged so a benchmark shows which physics backend it measured."""
+        try:
+            import carb.settings
+
+            carb_settings = carb.settings.get_settings()
+            physics = self.world.get_physics_context()
+            LOGGER.info(
+                "physics: device=%s gpu_dynamics=%s fabricEnabled=%s updateToUsd=%s",
+                getattr(self.world, "device", "unknown"),
+                physics.is_gpu_dynamics_enabled(),
+                carb_settings.get("/physics/fabricEnabled"),
+                carb_settings.get("/physics/updateToUsd"),
+            )
+        except Exception:
+            LOGGER.exception("could not read physics settings")
+
+    def _disable_viewport(self) -> None:
+        """Headless with no livestream: nobody can see the viewport, so stop
+        rendering it (Isaac Lab does the same for headless camera runs)."""
+        try:
+            from omni.kit.viewport.utility import get_active_viewport
+
+            viewport = get_active_viewport()
+            # hasattr: assigning to a missing property would silently create
+            # a plain attribute and log a false "disabled"
+            if viewport is None or not hasattr(viewport, "updates_enabled"):
+                LOGGER.info("no active viewport with updates_enabled; not disabled")
+                return
+            viewport.updates_enabled = False
+            LOGGER.info("viewport updates disabled (headless, no livestream)")
+        except Exception:
+            LOGGER.exception("could not disable the viewport; continuing")
+
+    def _apply_kit_settings(self, settings: Mapping[str, KitValue]) -> None:
+        """Set again after the stage opens, since stage render settings can
+        override startup values, then log what carb actually holds."""
+        if not settings:
+            return
+        try:
+            import carb.settings
+
+            carb_settings = carb.settings.get_settings()
+        except Exception:
+            LOGGER.exception("could not load carb settings; continuing")
+            return
+        report = {}
+        for path, value in settings.items():
+            try:
+                before = carb_settings.get(path)
+                carb_settings.set(path, _kit_value(value))
+                after = carb_settings.get(path)
+            except Exception:
+                LOGGER.exception("could not apply kit setting %s", path)
+                continue
+            report[path] = {"before": before, "after": after}
+            if before is None:
+                LOGGER.warning("unknown kit setting path, Kit may ignore it: %s", path)
+            elif type(before) is not type(after) and not (
+                isinstance(before, (int, float)) and isinstance(after, (int, float))
+            ):
+                LOGGER.warning(
+                    "kit setting %s changed type: %r -> %r", path, before, after
+                )
+        LOGGER.info("kit settings applied (read back): %s", report)
 
     def _add_fallback_lighting(self) -> None:
         from pxr import Sdf, UsdLux
@@ -1787,7 +2146,14 @@ class SimManager:
             "booted": self._booted.is_set(),
             "mock": self.mock,
             "error": str(self._boot_error) if self._boot_error else "",
+            "perf": self._stats.snapshot(),
+            "perf_totals": self._stats.totals(),
         }
+        if self.cfg is not None:
+            out["settings"] = {
+                key: getattr(self.cfg, key)
+                for key in _STATUS_SETTINGS
+            }
         if self._booted.is_set() and not self.mock:
             out["playing"] = self.is_playing()
             out["sim_time"] = self.sim_time_s()
@@ -4259,11 +4625,56 @@ class IsaacCameraHandle(CameraHandle):
     def __init__(self, sim: SimManager, camera) -> None:
         self._sim = sim
         self._cam = camera
+        self.last_read = time.monotonic()
+        self.paused = False
+        self.fresh_from = 0  # first _loop_index at which a read is fresh
+
+    def pause(self) -> None:
+        # Measured on Isaac Sim 5.0: pausing an unread camera recovers its
+        # render cost (about 9% step time for 1280x720).
+        self._cam.pause()
+        self.paused = True
+
+    def resume(self) -> None:
+        self._cam.resume()
+        self.paused = False
+        # a fresh resume counts as a read, or the next tick re-pauses it
+        self.last_read = time.monotonic()
 
     def reconfigure(self, attrs: dict[str, Any]) -> None:
         _apply_camera_configuration(self._cam, attrs)
 
+    # Steps to wait after resume before reading. With async rendering (the
+    # default; capture_after_render false), annotators can lag a frame, so one
+    # step may still return the pre-pause image. Verified on Isaac Sim 5.0: one step after resume returns a fresh frame.
+    RESUME_STEPS = 1
+
+    def _read(self, capture: Callable[[], Any]):
+        """On the sim thread: read now, or resume and read after the next
+        RESUME_STEPS renders (a paused camera's last frame is stale)."""
+        sim = self._sim
+        if self.paused:
+            self.resume()
+            self.fresh_from = sim._loop_index + self.RESUME_STEPS
+            return sim.run_after_next_step(capture, steps=self.RESUME_STEPS)
+        if sim._loop_index < self.fresh_from:
+            # steps=n resolves at the flush of iteration L+n-1, which for
+            # n = fresh_from - L is the same flush the resuming read waits for
+            return sim.run_after_next_step(capture, steps=self.fresh_from - sim._loop_index)
+        return capture()
+
+    def _get(self, capture: Callable[[], Any]):
+        if threading.get_ident() == self._sim._sim_thread_id and (
+            self.paused or self._sim._loop_index < self.fresh_from
+        ):
+            # run() executes inline on the sim thread; waiting for the future
+            # would block the loop that must render the frame
+            raise RuntimeError("cannot read a paused camera from the sim thread")
+        result = self._sim.run(lambda: self._read(capture))
+        return result.result(timeout=30.0) if isinstance(result, Future) else result
+
     def capture_rgb(self):
+        self.last_read = time.monotonic()
         frame = self._cam.get_rgba()
         if frame is None or frame.size == 0:
             raise RuntimeError("no frame available yet - is the simulation playing?")
@@ -4273,7 +4684,7 @@ class IsaacCameraHandle(CameraHandle):
         return str(self._cam.prim_path), tuple(self._cam.get_resolution())
 
     def get_rgb(self):
-        return self._sim.run(self.capture_rgb)
+        return self._get(self.capture_rgb)
 
     def _capture_rgbd(self):
         import numpy as np
@@ -4285,7 +4696,7 @@ class IsaacCameraHandle(CameraHandle):
         return rgb, np.asarray(depth, dtype=np.float32).squeeze().copy()  # some versions return (H, W, 1)
 
     def get_rgbd(self):
-        return self._sim.run(self._capture_rgbd)
+        return self._get(self._capture_rgbd)
 
     def _intrinsics(self) -> tuple[float, float, float, float]:
         # from the prim's real lens, so attached prim_path cameras without

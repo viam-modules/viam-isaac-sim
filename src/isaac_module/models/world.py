@@ -40,6 +40,19 @@ Attributes:
                                       images match joint state (default false)
   boot_timeout_sec (float)          - how long to wait for kit to boot
   kit_log_level (string)            - kit console verbosity, default "warning"
+  render_quality (string)           - "default" (unchanged images) or
+                                      "performance" (cheaper RTX lighting;
+                                      changes camera images)
+  kit_settings (object)             - carb settings set at boot, e.g.
+                                      {"/rtx/reflections/enabled": false}.
+                                      Keys are carb paths starting with
+                                      "/", segments using letters, digits,
+                                      _ . or -; string values can't contain
+                                      spaces or =. Overrides render_quality
+  camera_idle_sec (float)           - pause a camera's rendering after this
+                                      many seconds unread; 0 (default) is
+                                      off, otherwise >= 0.5. The first read
+                                      after a pause waits for a fresh frame
   props (list)                      - objects spawned into the scene at boot:
                                       {"name", "type": "cube"|"usd",
                                        "position": [x,y,z] meters,
@@ -101,7 +114,13 @@ from .. import FAMILY, NAMESPACE
 from ..dataset_upload import UploadRequest, upload_episode
 from ..episode_schema import MINIMUM_STAGE_FRAMES
 from ..nudge import NudgeConfig
-from ..sim_manager import SimConfig, SimManager, validate_rendering_dt
+from ..sim_manager import (
+    RENDER_QUALITY_PRESETS,
+    SimConfig,
+    SimManager,
+    validate_kit_settings,
+    validate_rendering_dt,
+)
 
 
 class IsaacWorld(Generic, EasyResource):
@@ -146,6 +165,17 @@ class IsaacWorld(Generic, EasyResource):
                     raise ValueError(f"water.{key} must be positive")
             if "level_m" in water and not math.isfinite(float(water["level_m"])):
                 raise ValueError("water.level_m must be finite")
+        quality = attrs.get("render_quality", "default")
+        if not isinstance(quality, str) or quality not in RENDER_QUALITY_PRESETS:
+            raise ValueError(
+                f"render_quality must be one of {sorted(RENDER_QUALITY_PRESETS)}"
+            )
+        if "camera_idle_sec" in attrs:
+            idle = float(attrs["camera_idle_sec"])
+            if not math.isfinite(idle) or (idle != 0.0 and idle < 0.5):
+                raise ValueError("camera_idle_sec must be 0 (off) or >= 0.5")
+        if "kit_settings" in attrs:
+            validate_kit_settings(attrs["kit_settings"])
         return [], []
 
     def reconfigure(
@@ -169,6 +199,9 @@ class IsaacWorld(Generic, EasyResource):
             real_time=bool(attrs.get("real_time", False)),
             boot_timeout=float(attrs.get("boot_timeout_sec", 300.0)),
             kit_log_level=str(attrs.get("kit_log_level", "warning")),
+            kit_settings=dict(attrs.get("kit_settings") or {}),
+            render_quality=str(attrs.get("render_quality", "default")),
+            camera_idle_sec=float(attrs.get("camera_idle_sec", 0.0)),
             livestream_public_ip=str(attrs.get("livestream_public_ip", "")),
             livestream_width=int(attrs.get("livestream_width", 1280)),
             livestream_height=int(attrs.get("livestream_height", 720)),
