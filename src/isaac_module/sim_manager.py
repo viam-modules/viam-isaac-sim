@@ -797,6 +797,7 @@ class SimManager:
         self._render_callbacks: dict[str, Callable[[], None]] = {}
         # [steps_remaining, fn, future]
         self._after_step: list[list[Any]] = []
+        self._loop_index = 0  # main_loop iterations started
         self._mock_sim_time_s = 0.0
         self._stats = StepStats()
         # component name -> (spawn attrs, handle). viam-server rebuilds
@@ -887,6 +888,7 @@ class SimManager:
         self._sim_thread_id = threading.get_ident()
 
         while not self._stop.is_set() and not self._boot_requested.wait(timeout=0.1):
+            self._loop_index += 1
             self._drain_tasks()
 
         if self._stop.is_set():
@@ -906,6 +908,7 @@ class SimManager:
         step_dt = self.cfg.resolved_rendering_dt() if pacer else 0.0
         while not self._stop.is_set():
             loop_start = time.perf_counter()
+            self._loop_index += 1
             self._drain_tasks()
             now = time.monotonic()
             dt = now - last
@@ -976,6 +979,8 @@ class SimManager:
     def _flush_after_step(self) -> None:
         # Futures still queued when the loop stops are never resolved; their
         # callers fall back to their own timeout.
+        if not self._after_step:
+            return
         due, waiting = [], []
         for entry in self._after_step:
             entry[0] -= 1
@@ -1022,15 +1027,20 @@ class SimManager:
             return
 
         def resume() -> Future | None:
-            resumed = False
+            paused = []
             for name in names:
                 entry = self._handles.get(name) if name else None
                 handle = entry[1] if entry else None
                 if isinstance(handle, IsaacCameraHandle) and handle.paused:
-                    handle.resume()
-                    resumed = True
-            if not resumed:
+                    paused.append(handle)
+            if not paused:
                 return None
+            if threading.get_ident() == self._sim_thread_id:
+                # waiting here would block the loop that must render the frame
+                raise RuntimeError("cannot resume cameras from the sim thread")
+            for handle in paused:
+                handle.resume()
+                handle.fresh_from = self._loop_index + IsaacCameraHandle.RESUME_STEPS
             return self.run_after_next_step(
                 lambda: None, steps=IsaacCameraHandle.RESUME_STEPS
             )
@@ -4737,6 +4747,7 @@ class IsaacCameraHandle(CameraHandle):
         self._cam = camera
         self.last_read = time.monotonic()
         self.paused = False
+        self.fresh_from = 0  # first _loop_index at which a read is fresh
 
     def pause(self) -> None:
         # Verify on 5.0 that Camera.pause() stops the render product
@@ -4762,13 +4773,21 @@ class IsaacCameraHandle(CameraHandle):
     def _read(self, capture: Callable[[], Any]):
         """On the sim thread: read now, or resume and read after the next
         RESUME_STEPS renders (a paused camera's last frame is stale)."""
-        if not self.paused:
-            return capture()
-        self.resume()
-        return self._sim.run_after_next_step(capture, steps=self.RESUME_STEPS)
+        sim = self._sim
+        if self.paused:
+            self.resume()
+            self.fresh_from = sim._loop_index + self.RESUME_STEPS
+            return sim.run_after_next_step(capture, steps=self.RESUME_STEPS)
+        if sim._loop_index < self.fresh_from:
+            # steps=n resolves at the flush of iteration L+n-1, which for
+            # n = fresh_from - L is the same flush the resuming read waits for
+            return sim.run_after_next_step(capture, steps=self.fresh_from - sim._loop_index)
+        return capture()
 
     def _get(self, capture: Callable[[], Any]):
-        if threading.get_ident() == self._sim._sim_thread_id and self.paused:
+        if threading.get_ident() == self._sim._sim_thread_id and (
+            self.paused or self._sim._loop_index < self.fresh_from
+        ):
             # run() executes inline on the sim thread; waiting for the future
             # would block the loop that must render the frame
             raise RuntimeError("cannot read a paused camera from the sim thread")
