@@ -15,6 +15,7 @@ import hashlib
 import math
 import os
 import queue
+import re
 import sys
 import tempfile
 import threading
@@ -227,7 +228,7 @@ KitValue = bool | int | float | str
 
 def _kit_value(value: KitValue) -> KitValue:
     """Viam structs turn ints into floats; Kit int settings want ints back."""
-    if isinstance(value, float) and value.is_integer():
+    if isinstance(value, float) and value.is_integer() and abs(value) < 2**53:
         return int(value)
     return value
 
@@ -237,8 +238,10 @@ def validate_kit_settings(value: Any) -> dict[str, KitValue]:
     if not isinstance(value, dict):
         raise ValueError('kit_settings must be an object of {"/setting/path": value}')
     for path, v in value.items():
-        if not isinstance(path, str) or not path.startswith("/"):
-            raise ValueError(f"kit_settings key {path!r} must start with '/'")
+        if not isinstance(path, str) or not re.fullmatch(r"(/[A-Za-z0-9_.\-]+)+", path):
+            raise ValueError(
+                f"kit_settings key {path!r} must look like '/rtx/some-setting'"
+            )
         if isinstance(v, bool):
             continue
         if isinstance(v, (int, float)) and math.isfinite(v):
@@ -1767,14 +1770,28 @@ class SimManager:
             import carb.settings
 
             carb_settings = carb.settings.get_settings()
-            for path, value in settings.items():
-                carb_settings.set(path, _kit_value(value))
-            LOGGER.info(
-                "kit settings applied (read back): %s",
-                {path: carb_settings.get(path) for path in settings},
-            )
         except Exception:
-            LOGGER.exception("could not apply kit_settings; continuing")
+            LOGGER.exception("could not load carb settings; continuing")
+            return
+        report = {}
+        for path, value in settings.items():
+            try:
+                before = carb_settings.get(path)
+                carb_settings.set(path, _kit_value(value))
+                after = carb_settings.get(path)
+            except Exception:
+                LOGGER.exception("could not apply kit setting %s", path)
+                continue
+            report[path] = {"before": before, "after": after}
+            if before is None:
+                LOGGER.warning("unknown kit setting path, Kit may ignore it: %s", path)
+            elif type(before) is not type(after) and not (
+                isinstance(before, (int, float)) and isinstance(after, (int, float))
+            ):
+                LOGGER.warning(
+                    "kit setting %s changed type: %r -> %r", path, before, after
+                )
+        LOGGER.info("kit settings applied (read back): %s", report)
 
     def _add_fallback_lighting(self) -> None:
         from pxr import Sdf, UsdLux
