@@ -443,6 +443,23 @@ _STATUS_SETTINGS = (
 )
 
 
+def cameras_to_pause(
+    last_reads: Mapping[str, float],
+    paused: set[str],
+    protected: set[str],
+    now: float,
+    idle_sec: float,
+) -> list[str]:
+    """Cameras unread for idle_sec that aren't already paused or recording."""
+    if idle_sec <= 0.0:
+        return []
+    return [
+        name
+        for name, last in last_reads.items()
+        if name not in paused and name not in protected and now - last > idle_sec
+    ]
+
+
 @dataclass
 class SimConfig:
     mock: bool = False
@@ -485,6 +502,11 @@ class SimConfig:
     kit_settings: dict[str, Any] = field(default_factory=dict)
     # "default" | "performance"; see RENDER_QUALITY_PRESETS
     render_quality: str = "default"
+    # pause a camera's rendering after this many seconds without a read;
+    # 0 disables; otherwise >= 0.5 so a just-resumed camera isn't re-paused
+    # before an episode's first sample. The first read after a pause waits
+    # for a fresh rendered frame.
+    camera_idle_sec: float = 0.0
     # add_default_ground_plane loads the Grid env USD, which bundles floor
     # collider AND the lighting rig; when false, we add fallback lights
     isaac_default_environment: bool = True
@@ -773,6 +795,8 @@ class SimManager:
         # run after each rendered frame (e.g. lidar scan polling); physics
         # step callbacks fire per substep, which is too often for sensors
         self._render_callbacks: dict[str, Callable[[], None]] = {}
+        # [steps_remaining, fn, future]
+        self._after_step: list[list[Any]] = []
         self._mock_sim_time_s = 0.0
         self._stats = StepStats()
         # component name -> (spawn attrs, handle). viam-server rebuilds
@@ -893,6 +917,7 @@ class SimManager:
                 # wall time elapsed since boot.
                 self._mock_sim_time_s += dt
                 time.sleep(0.01)
+                self._flush_after_step()
                 step_s, sim_dt = 0.0, dt
             else:
                 # One rendered frame plus rendering_dt / physics_dt physics
@@ -908,6 +933,8 @@ class SimManager:
                         render_cb()
                     except Exception:
                         LOGGER.exception("render callback failed")
+                self._flush_after_step()
+                self._pause_idle_cameras()
                 if self._capture_after_render_active:
                     self._capture_after_render()
                 if pacer is not None:
@@ -937,6 +964,80 @@ class SimManager:
                     fut.set_result(fn())
                 except BaseException as e:
                     fut.set_exception(e)
+
+    def run_after_next_step(self, fn: Callable[[], Any], steps: int = 1) -> Future:
+        """Sim thread only: run fn after `steps` more world.steps and resolve
+        the returned future with its result. Lets a task wait for a render
+        without blocking the loop that renders."""
+        fut: Future = Future()
+        self._after_step.append([max(1, steps), fn, fut])
+        return fut
+
+    def _flush_after_step(self) -> None:
+        # Futures still queued when the loop stops are never resolved; their
+        # callers fall back to their own timeout.
+        due, waiting = [], []
+        for entry in self._after_step:
+            entry[0] -= 1
+            (due if entry[0] <= 0 else waiting).append(entry)
+        self._after_step = waiting
+        for _, fn, fut in due:
+            if fut.set_running_or_notify_cancel():
+                try:
+                    fut.set_result(fn())
+                except BaseException as e:
+                    fut.set_exception(e)
+
+    def _pause_idle_cameras(self) -> None:
+        cfg = self.cfg
+        if cfg is None or cfg.camera_idle_sec <= 0.0:
+            return
+        cameras = {
+            name: handle
+            # list(): viam threads add handles while this runs on the sim thread
+            for name, (_, handle) in list(self._handles.items())
+            if isinstance(handle, IsaacCameraHandle)
+        }
+        protected = {
+            name
+            for name, handle in cameras.items()
+            if self._capture_handles is not None and handle in self._capture_handles
+        }
+        for name in cameras_to_pause(
+            {name: h.last_read for name, h in cameras.items()},
+            {name for name, h in cameras.items() if h.paused},
+            protected,
+            time.monotonic(),
+            cfg.camera_idle_sec,
+        ):
+            try:
+                cameras[name].pause()
+            except Exception:
+                LOGGER.exception("could not pause idle camera %s", name)
+
+    def _resume_cameras(self, names: Sequence[str]) -> None:
+        """Off the sim thread: resume any paused cameras among names and wait
+        until they have rendered, so an episode's first sample is fresh."""
+        if self.mock:
+            return
+
+        def resume() -> Future | None:
+            resumed = False
+            for name in names:
+                entry = self._handles.get(name) if name else None
+                handle = entry[1] if entry else None
+                if isinstance(handle, IsaacCameraHandle) and handle.paused:
+                    handle.resume()
+                    resumed = True
+            if not resumed:
+                return None
+            return self.run_after_next_step(
+                lambda: None, steps=IsaacCameraHandle.RESUME_STEPS
+            )
+
+        pending = self.run(resume)
+        if pending is not None:
+            pending.result(timeout=30.0)
 
     def run(self, fn: Callable[[], Any], timeout: float = 30.0) -> Any:
         """Run fn on the sim thread and return its result."""
@@ -1357,6 +1458,9 @@ class SimManager:
                 }
             return result
 
+        self._resume_cameras(
+            [fixed_camera_name, wrist_camera_name, fixed_camera_2_name]
+        )
         return self.run(_start, timeout=120.0)
 
     def active_episode_stage_frame_count(self) -> int | None:
@@ -4631,11 +4735,48 @@ class IsaacCameraHandle(CameraHandle):
     def __init__(self, sim: SimManager, camera) -> None:
         self._sim = sim
         self._cam = camera
+        self.last_read = time.monotonic()
+        self.paused = False
+
+    def pause(self) -> None:
+        # Verify on 5.0 that Camera.pause() stops the render product
+        # (hydra_texture.set_updates_enabled(False)); if it only stops data
+        # callbacks, call set_updates_enabled on its render product instead.
+        self._cam.pause()
+        self.paused = True
+
+    def resume(self) -> None:
+        self._cam.resume()
+        self.paused = False
+        # a fresh resume counts as a read, or the next tick re-pauses it
+        self.last_read = time.monotonic()
 
     def reconfigure(self, attrs: dict[str, Any]) -> None:
         _apply_camera_configuration(self._cam, attrs)
 
+    # Steps to wait after resume before reading. With async rendering (the
+    # default; capture_after_render false), annotators can lag a frame, so one
+    # step may still return the pre-pause image. Task 9 Step 8 measures this.
+    RESUME_STEPS = 1
+
+    def _read(self, capture: Callable[[], Any]):
+        """On the sim thread: read now, or resume and read after the next
+        RESUME_STEPS renders (a paused camera's last frame is stale)."""
+        if not self.paused:
+            return capture()
+        self.resume()
+        return self._sim.run_after_next_step(capture, steps=self.RESUME_STEPS)
+
+    def _get(self, capture: Callable[[], Any]):
+        if threading.get_ident() == self._sim._sim_thread_id and self.paused:
+            # run() executes inline on the sim thread; waiting for the future
+            # would block the loop that must render the frame
+            raise RuntimeError("cannot read a paused camera from the sim thread")
+        result = self._sim.run(lambda: self._read(capture))
+        return result.result(timeout=30.0) if isinstance(result, Future) else result
+
     def capture_rgb(self):
+        self.last_read = time.monotonic()
         frame = self._cam.get_rgba()
         if frame is None or frame.size == 0:
             raise RuntimeError("no frame available yet - is the simulation playing?")
@@ -4645,7 +4786,7 @@ class IsaacCameraHandle(CameraHandle):
         return str(self._cam.prim_path), tuple(self._cam.get_resolution())
 
     def get_rgb(self):
-        return self._sim.run(self.capture_rgb)
+        return self._get(self.capture_rgb)
 
     def _capture_rgbd(self):
         import numpy as np
@@ -4657,7 +4798,7 @@ class IsaacCameraHandle(CameraHandle):
         return rgb, np.asarray(depth, dtype=np.float32).squeeze().copy()  # some versions return (H, W, 1)
 
     def get_rgbd(self):
-        return self._sim.run(self._capture_rgbd)
+        return self._get(self._capture_rgbd)
 
     def _intrinsics(self) -> tuple[float, float, float, float]:
         # from the prim's real lens, so attached prim_path cameras without
