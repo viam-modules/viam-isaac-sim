@@ -261,6 +261,35 @@ def kit_settings_argv(settings: Mapping[str, KitValue]) -> list[str]:
     return out
 
 
+# Isaac Lab's apps/rendering_modes/performance.kit (tag v2.2.0; removed from
+# main), the seven keys we take. Opt-in: these change camera images, and
+# policies are trained on those images.
+RENDER_QUALITY_PRESETS: dict[str, dict[str, KitValue]] = {
+    "default": {},
+    "performance": {
+        "/rtx/reflections/enabled": False,
+        "/rtx/translucency/enabled": False,
+        "/rtx/indirectDiffuse/enabled": True,
+        "/rtx/ambientOcclusion/enabled": False,
+        "/rtx/directLighting/sampledLighting/enabled": False,
+        "/rtx/post/dlss/execMode": 0,
+        "/rtx-transient/dlssg/enabled": False,
+    },
+}
+
+
+def kit_settings_for(
+    render_quality: str, kit_settings: Mapping[str, KitValue]
+) -> dict[str, KitValue]:
+    """The render_quality preset with the user's kit_settings on top."""
+    if render_quality not in RENDER_QUALITY_PRESETS:
+        raise ValueError(
+            f"render_quality must be one of {sorted(RENDER_QUALITY_PRESETS)}, "
+            f"not {render_quality!r}"
+        )
+    return {**RENDER_QUALITY_PRESETS[render_quality], **kit_settings}
+
+
 def parse_markers(raw: Any) -> list[dict[str, Any]]:
     """Validate a base's ``markers``: visual-only colored squares riding on
     the base for cameras to find (fiducials). Each is
@@ -422,6 +451,8 @@ class SimConfig:
     # carb settings applied at boot: {"/rtx/...": value}. Passed on kit's
     # command line and set again after the stage opens (see _apply_kit_settings).
     kit_settings: dict[str, Any] = field(default_factory=dict)
+    # "default" | "performance"; see RENDER_QUALITY_PRESETS
+    render_quality: str = "default"
     # add_default_ground_plane loads the Grid env USD, which bundles floor
     # collider AND the lighting rig; when false, we add fallback lights
     isaac_default_environment: bool = True
@@ -1558,7 +1589,7 @@ class SimManager:
                 ]
             )
 
-        kit_settings = dict(cfg.kit_settings)
+        kit_settings = kit_settings_for(cfg.render_quality, cfg.kit_settings)
         sys.argv.extend(kit_settings_argv(kit_settings))
 
         streaming = cfg.livestream and cfg.headless

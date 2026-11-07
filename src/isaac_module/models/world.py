@@ -40,6 +40,9 @@ Attributes:
                                       images match joint state (default false)
   boot_timeout_sec (float)          - how long to wait for kit to boot
   kit_log_level (string)            - kit console verbosity, default "warning"
+  render_quality (string)           - "default" (unchanged images) or
+                                      "performance" (cheaper RTX lighting;
+                                      changes camera images)
   kit_settings (object)             - carb settings set at boot, e.g.
                                       {"/rtx/reflections/enabled": false}.
                                       Keys start with "/". Overrides
@@ -106,6 +109,7 @@ from ..dataset_upload import UploadRequest, upload_episode
 from ..episode_schema import MINIMUM_STAGE_FRAMES
 from ..nudge import NudgeConfig
 from ..sim_manager import (
+    RENDER_QUALITY_PRESETS,
     SimConfig,
     SimManager,
     validate_kit_settings,
@@ -155,6 +159,11 @@ class IsaacWorld(Generic, EasyResource):
                     raise ValueError(f"water.{key} must be positive")
             if "level_m" in water and not math.isfinite(float(water["level_m"])):
                 raise ValueError("water.level_m must be finite")
+        quality = attrs.get("render_quality", "default")
+        if quality not in RENDER_QUALITY_PRESETS:
+            raise ValueError(
+                f"render_quality must be one of {sorted(RENDER_QUALITY_PRESETS)}"
+            )
         if "kit_settings" in attrs:
             validate_kit_settings(attrs["kit_settings"])
         return [], []
@@ -181,6 +190,7 @@ class IsaacWorld(Generic, EasyResource):
             boot_timeout=float(attrs.get("boot_timeout_sec", 300.0)),
             kit_log_level=str(attrs.get("kit_log_level", "warning")),
             kit_settings=dict(attrs.get("kit_settings") or {}),
+            render_quality=str(attrs.get("render_quality", "default")),
             livestream_public_ip=str(attrs.get("livestream_public_ip", "")),
             livestream_width=int(attrs.get("livestream_width", 1280)),
             livestream_height=int(attrs.get("livestream_height", 720)),

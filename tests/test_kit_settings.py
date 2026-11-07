@@ -93,3 +93,26 @@ def test_apply_kit_settings_per_key(monkeypatch, caplog):
     assert "unknown kit setting path, Kit may ignore it: /unknown" in text
     assert "kit settings applied (read back)" in text
     assert "'/a': {'before': 1, 'after': 10}" in text
+
+
+from isaac_module.sim_manager import RENDER_QUALITY_PRESETS, kit_settings_for
+
+
+def test_default_quality_applies_only_user_settings():
+    assert kit_settings_for("default", {"/x": True}) == {"/x": True}
+
+
+def test_performance_preset_merged_and_user_wins():
+    merged = kit_settings_for("performance", {"/rtx/reflections/enabled": True})
+    assert merged["/rtx/reflections/enabled"] is True
+    preset = RENDER_QUALITY_PRESETS["performance"]
+    assert {k: v for k, v in merged.items() if k != "/rtx/reflections/enabled"} == {
+        k: v for k, v in preset.items() if k != "/rtx/reflections/enabled"
+    }
+
+
+def test_unknown_quality_rejected():
+    with pytest.raises(ValueError):
+        kit_settings_for("ultra", {})
+    with pytest.raises(ValueError):
+        IsaacWorld.validate_config(_config({"render_quality": "ultra"}))
