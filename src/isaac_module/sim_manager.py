@@ -1724,6 +1724,7 @@ class SimManager:
         if cfg.headless and not cfg.livestream:
             self._disable_viewport()
         self.world.reset()
+        self._log_physics_settings()
         LOGGER.info("isaac sim world ready")
 
     def _spawn_water(self, water: dict[str, Any]) -> None:
@@ -1762,6 +1763,23 @@ class SimManager:
         )
         self.world.scene.add(seabed)
         LOGGER.info("water surface at z=%.2f m, seabed %.1f m below", level, depth)
+
+    def _log_physics_settings(self) -> None:
+        """Logged so a benchmark shows which physics backend it measured."""
+        try:
+            import carb.settings
+
+            carb_settings = carb.settings.get_settings()
+            physics = self.world.get_physics_context()
+            LOGGER.info(
+                "physics: device=%s gpu_dynamics=%s fabricEnabled=%s updateToUsd=%s",
+                getattr(self.world, "device", "unknown"),
+                physics.is_gpu_dynamics_enabled(),
+                carb_settings.get("/physics/fabricEnabled"),
+                carb_settings.get("/physics/updateToUsd"),
+            )
+        except Exception:
+            LOGGER.exception("could not read physics settings")
 
     def _disable_viewport(self) -> None:
         """Headless with no livestream: nobody can see the viewport, so stop
