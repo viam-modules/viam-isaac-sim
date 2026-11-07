@@ -16,3 +16,5 @@ runs/
 
 # see makefile for explanation
 run.sh
+node_modules/
+!scene_camera_ui/tsconfig.json

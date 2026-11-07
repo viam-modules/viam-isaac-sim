@@ -1,0 +1,3 @@
+@import 'tailwindcss';
+@import '@viamrobotics/tailwind-config';
+@source '../node_modules/@viamrobotics/prime-core/dist';

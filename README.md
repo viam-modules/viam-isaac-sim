@@ -24,6 +24,7 @@ What it is/does
 | `viam-labs:isaac-sim:arm` | `arm` | Spawns (or attaches to) an articulation - UR arms, Franka, or any USD - and exposes joint control. |
 | `viam-labs:isaac-sim:gripper` | `gripper` | Exposes a supported parallel gripper, including the Lite 6's integrated gripper. |
 | `viam-labs:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves its RGB frames. |
+| `viam-labs:isaac-sim:scene_camera` | `camera` | A camera that orbits a target, with an in-app control to orbit, pan and zoom it. |
 | `viam-labs:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
 | `viam-labs:isaac-sim:motor` | `motor` | A thruster that pushes a rigid body (a floating prop, say); two of them steer by differential thrust. |
 | `viam-labs:isaac-sim:movement_sensor` | `movement_sensor` | GPS, IMU and compass readings from a rigid body. |
@@ -312,6 +313,34 @@ Frame pose, `target`, `fov_deg`, and `near_clip_m` updates apply live when no
 episode is being captured. Changing `prim_path`, `parent_prim`, `width`, or
 `height` requires restarting the module. Camera changes are rejected during
 native or CosmosWriter episode capture.
+
+### scene_camera attributes
+
+Takes the same attributes as `camera`, except `parent_prim` and the orientation
+attributes, which it rejects: a scene camera always looks at `target`. Use the
+standard frame's translation or `position` for where it sits. A frame
+orientation must be identity. `position` defaults to `[3, 3, 2.5]`, `target` to
+`[0, 0, 0]` and `fov_deg` to 70. Together they are the home view.
+
+The model ships a custom control, so the Viam app shows the camera image. Drag
+it to orbit, shift-drag or two-finger drag to pan, scroll or pinch to zoom, and
+double-click, the Home button or the H or Home key to return to the home view.
+Arrow keys orbit, +/- zoom, and H or the Home key returns home. The same moves are
+available over DoCommand:
+
+| Command | Reply |
+|---|---|
+| `{"command": "get_view"}` | `{target, distance, yaw_deg, pitch_deg, fov_deg, home, recording}` |
+| `{"command": "set_view", "yaw_deg": 45}` | the new view; accepts any of `target`, `distance`, `yaw_deg`, `pitch_deg`, `fov_deg` |
+| `{"command": "reset_view"}` | the home view |
+
+Yaw is measured about +Z from +X, and pitch is elevation, clamped to ±89°. The
+view cannot change while an episode records. A flown view lasts until the
+component's config changes or the module restarts. The frame system keeps
+reporting the config pose.
+
+Building the module now builds the control too, so a host that runs
+`make module.tar.gz` or `viam module reload` needs Node 22 or newer and pnpm.
 
 ### Policy execution
 

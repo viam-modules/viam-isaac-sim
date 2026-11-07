@@ -158,3 +158,10 @@ def test_isaac_camera_configuration_applies_and_reads_back_state():
     assert camera.focal_length == pytest.approx(
         camera.aperture / (2.0 * math.tan(math.radians(60.0) / 2.0))
     )
+
+
+def test_episode_active_reflects_episode_id():
+    manager = _camera_manager()
+    assert manager.episode_active is False
+    manager._episode_id = "000001"
+    assert manager.episode_active is True

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>scene_camera-control: dev host</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 1rem;
+      }
+      iframe {
+        width: 100%;
+        border: 1px solid #ccc;
+      }
+    </style>
+  </head>
+  <body>
+    <p role="status">Connecting…</p>
+    <!--
+      allow-same-origin is dev only: Vite's CORS policy refuses module scripts to the opaque origin a
+      fully sandboxed frame has. The CSP in index.html still applies. The Viam app uses allow-scripts alone.
+    -->
+    <iframe sandbox="allow-scripts allow-same-origin" src="/index.html" title="Control"></iframe>
+    <script type="module" src="./host.ts"></script>
+  </body>
+</html>
