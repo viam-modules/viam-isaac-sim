@@ -183,7 +183,7 @@ def test_max_joint_acceleration_must_be_positive_finite_number(value):
         IsaacArm.validate_config(config)
 
 
-def test_max_joint_velocity_is_applied_to_only_arm_dofs():
+def test_max_joint_velocity_is_reported_for_only_arm_dofs():
     art = _FakeArt([0.0] * 7)
     art.dof_names = list(UR_JOINT_NAMES) + ["finger_joint"]
 
@@ -197,11 +197,7 @@ def test_max_joint_velocity_is_applied_to_only_arm_dofs():
         max_joint_deg_s2=60.0,
     )
 
-    assert len(art.max_velocity_calls) == 1
-    values, joint_indices = art.max_velocity_calls[0]
-    assert values.shape == (1, 6)
-    assert values[0].tolist() == pytest.approx([math.pi] * 6)
-    assert joint_indices.tolist() == list(range(6))
+    assert art.max_velocity_calls == []
     metadata = handle.dynamics_metadata()
     assert metadata["max_velocity_rad_s"] == pytest.approx([math.pi] * 6)
     assert metadata["max_acceleration_rad_s2"] == pytest.approx(
