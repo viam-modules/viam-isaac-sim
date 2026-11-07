@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
@@ -287,6 +288,59 @@ class RealTimePacer:
             self._deadline = target
         else:
             self._deadline = now
+
+
+class StepStats:
+    """Rolling window of sim-loop timings, reported as status()["perf"].
+
+    record() runs on the sim thread; snapshot() runs on any thread."""
+
+    def __init__(
+        self, window_s: float = 2.0, clock: Callable[[], float] = time.monotonic
+    ) -> None:
+        self._window_s = window_s
+        self._clock = clock
+        self._lock = threading.Lock()
+        # (recorded_at, step_s, loop_s, sim_dt)
+        self._samples: deque[tuple[float, float, float, float]] = deque()
+
+    def record(self, step_s: float, loop_s: float, sim_dt: float) -> None:
+        now = self._clock()
+        with self._lock:
+            self._samples.append((now, step_s, loop_s, sim_dt))
+            while now - self._samples[0][0] > self._window_s:
+                self._samples.popleft()
+
+    def snapshot(self) -> dict[str, float]:
+        with self._lock:
+            samples = list(self._samples)
+        n = len(samples)
+        wall = sum(s[2] for s in samples)
+        if n == 0 or wall <= 0.0:
+            return {
+                "real_time_factor": 0.0,
+                "step_ms": 0.0,
+                "loop_ms": 0.0,
+                "render_hz": 0.0,
+            }
+        return {
+            "real_time_factor": sum(s[3] for s in samples) / wall,
+            "step_ms": 1000.0 * sum(s[1] for s in samples) / n,
+            "loop_ms": 1000.0 * wall / n,
+            "render_hz": n / wall,
+        }
+
+
+# SimConfig fields echoed by status() so benchmark output records the settings
+# it ran under. Missing fields are skipped, so this survives branch reordering.
+_STATUS_SETTINGS = (
+    "headless",
+    "livestream",
+    "real_time",
+    "render_quality",
+    "kit_settings",
+    "camera_idle_sec",
+)
 
 
 @dataclass
@@ -615,6 +669,7 @@ class SimManager:
         # step callbacks fire per substep, which is too often for sensors
         self._render_callbacks: dict[str, Callable[[], None]] = {}
         self._mock_sim_time_s = 0.0
+        self._stats = StepStats()
         # component name -> (spawn attrs, handle). viam-server rebuilds
         # resources on config change, but prims can't be re-spawned without
         # restarting kit, so handles are cached per component name.
@@ -721,6 +776,7 @@ class SimManager:
         pacer = RealTimePacer() if self.cfg and self.cfg.real_time and not self.mock else None
         step_dt = self.cfg.resolved_rendering_dt() if pacer else 0.0
         while not self._stop.is_set():
+            loop_start = time.perf_counter()
             self._drain_tasks()
             now = time.monotonic()
             dt = now - last
@@ -732,10 +788,16 @@ class SimManager:
                 # wall time elapsed since boot.
                 self._mock_sim_time_s += dt
                 time.sleep(0.01)
+                step_s, sim_dt = 0.0, dt
             else:
                 # One rendered frame plus rendering_dt / physics_dt physics
                 # substeps; physics callbacks fire once per substep.
+                sim_before = self.world.current_time
+                step_start = time.perf_counter()
                 self.world.step(render=True)
+                step_s = time.perf_counter() - step_start
+                # the reset DoCommand rewinds current_time to 0
+                sim_dt = max(0.0, self.world.current_time - sim_before)
                 for render_cb in list(self._render_callbacks.values()):
                     try:
                         render_cb()
@@ -745,6 +807,7 @@ class SimManager:
                     self._capture_after_render()
                 if pacer is not None:
                     pacer.after_step(step_dt)
+            self._stats.record(step_s, time.perf_counter() - loop_start, sim_dt)
 
         if self._episode_id is not None:
             try:
@@ -1846,7 +1909,14 @@ class SimManager:
             "booted": self._booted.is_set(),
             "mock": self.mock,
             "error": str(self._boot_error) if self._boot_error else "",
+            "perf": self._stats.snapshot(),
         }
+        if self.cfg is not None:
+            out["settings"] = {
+                key: getattr(self.cfg, key)
+                for key in _STATUS_SETTINGS
+                if hasattr(self.cfg, key)
+            }
         if self._booted.is_set() and not self.mock:
             out["playing"] = self.is_playing()
             out["sim_time"] = self.sim_time_s()
