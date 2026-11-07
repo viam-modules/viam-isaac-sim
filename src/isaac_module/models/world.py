@@ -160,7 +160,7 @@ class IsaacWorld(Generic, EasyResource):
             if "level_m" in water and not math.isfinite(float(water["level_m"])):
                 raise ValueError("water.level_m must be finite")
         quality = attrs.get("render_quality", "default")
-        if quality not in RENDER_QUALITY_PRESETS:
+        if not isinstance(quality, str) or quality not in RENDER_QUALITY_PRESETS:
             raise ValueError(
                 f"render_quality must be one of {sorted(RENDER_QUALITY_PRESETS)}"
             )
