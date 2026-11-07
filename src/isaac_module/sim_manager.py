@@ -463,19 +463,23 @@ def cameras_to_pause(
 def ramp_toward(
     current: Sequence[float], goal: Sequence[float], max_step: float
 ) -> list[float]:
-    """Move each joint toward its goal by at most max_step (radians).
+    """Move toward goal along the straight joint-space segment, so the fastest
+    joint moves at most max_step (radians) and the others scale with it.
 
-    A joint within max_step lands exactly on its goal, so callers can compare
-    for equality to know the ramp finished."""
+    Within max_step of the goal, returns the goal floats exactly, so callers
+    can compare for equality to know the ramp finished."""
     if len(current) != len(goal):
         raise ValueError(
             f"ramp needs matching lengths, got {len(current)} and {len(goal)}"
         )
-    out = []
-    for c, g in zip(current, goal):
-        delta = g - c
-        out.append(g if abs(delta) <= max_step else c + math.copysign(max_step, delta))
-    return out
+    if max_step <= 0.0:
+        return list(current)
+    deltas = [g - c for c, g in zip(current, goal)]
+    biggest = max((abs(d) for d in deltas), default=0.0)
+    if biggest <= max_step:
+        return list(goal)
+    scale = max_step / biggest
+    return [c + d * scale for c, d in zip(current, deltas)]
 
 
 @dataclass
@@ -3776,6 +3780,8 @@ class IsaacArmHandle(ArmHandle):
             raise ValueError(
                 f"expected {len(self._joint_indices)} joint positions, got {len(positions)}"
             )
+        if not all(math.isfinite(v) for v in positions):
+            raise ValueError("joint targets must be finite")
 
         def _apply():
             self._target = list(positions)

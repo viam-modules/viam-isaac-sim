@@ -473,3 +473,16 @@ def test_reports_moving_across_overlapping_moves(world):
         assert not await arm.is_moving()
 
     asyncio.run(scenario())
+
+
+def test_stream_step_never_outruns_velocity_limit(world):
+    # 10 deg/s at 50 Hz is 0.2 deg per tick, below the 2 deg path step
+    arm = IsaacArm.new(
+        _config(
+            "my-arm",
+            {"world": "sim-world", "asset": "ur20", "mock_dof": 6, "max_joint_deg_s": 10.0},
+        ),
+        {},
+    )
+    assert arm._max_step_rad == pytest.approx(math.radians(10.0) / 50.0)
+    assert _arm(world)._max_step_rad == pytest.approx(math.radians(2.0))

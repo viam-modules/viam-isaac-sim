@@ -11,8 +11,10 @@ Attributes:
                                      known assets provide a default when available
   arm_model (string)               - optional episode manifest label for a custom USD
   move_timeout_sec (float)         - max time to wait for a move (default 30)
-  max_joint_deg_s (float)          - optional positive per-joint velocity limit passed
-                                     to the Isaac articulation
+  max_joint_deg_s (float)          - optional positive per-joint velocity limit: latched
+                                     joint targets ramp at this speed, and it is the
+                                     velocity limit reported to trajectory
+                                     parameterizers
   max_joint_deg_s2 (float)         - optional positive per-joint acceleration limit
                                      reported for trajectory parameterization
   is_moving_velocity_threshold_rad_s (float) - velocity above which IsMoving
@@ -236,6 +238,12 @@ class IsaacArm(Arm, EasyResource):
             )
         self._max_step_rad = math.radians(step_deg)
         self._attrs = attrs
+        limit_deg_s = _max_joint_deg_s(attrs, config.name)
+        if limit_deg_s is not None:
+            # Don't stream targets faster than the handle ramps them.
+            self._max_step_rad = min(
+                self._max_step_rad, math.radians(limit_deg_s) * self._control_period
+            )
         attrs["is_moving_velocity_threshold_rad_s"] = (
             _is_moving_velocity_threshold(attrs, config.name)
         )
