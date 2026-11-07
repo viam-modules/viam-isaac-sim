@@ -5,6 +5,7 @@ the viam component models against it."""
 import asyncio
 import math
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -70,6 +71,11 @@ def test_world_boots_and_status(world):
     status = asyncio.run(world.do_command({"command": "status"}))
     assert status["booted"] is True
     assert status["mock"] is True
+    deadline = time.monotonic() + 2.0
+    while status["perf"]["render_hz"] <= 0 and time.monotonic() < deadline:
+        time.sleep(0.02)
+        status = asyncio.run(world.do_command({"command": "status"}))
+    assert status["perf"]["render_hz"] > 0
     assert set(status["perf"]) == {
         "real_time_factor",
         "step_ms",

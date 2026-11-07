@@ -737,7 +737,7 @@ class SimManager:
                 step_start = time.perf_counter()
                 self.world.step(render=True)
                 step_s = time.perf_counter() - step_start
-                # the reset DoCommand rewinds current_time to 0
+                # defensive clamp: a time rewind must never show up as negative sim time
                 sim_dt = max(0.0, self.world.current_time - sim_before)
                 for render_cb in list(self._render_callbacks.values()):
                     try:
