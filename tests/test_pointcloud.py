@@ -6,6 +6,7 @@ import pytest
 
 from isaac_module.pointcloud import (
     encode_depth,
+    filter_range,
     optical_to_axes,
     to_pcd,
     unproject,
@@ -57,6 +58,12 @@ def test_unproject_drops_invalid_and_far_and_keeps_colors():
 def test_optical_to_axes(axes, expected):
     out = optical_to_axes(np.array([[1.0, 2.0, 3.0]], dtype=np.float32), axes)
     assert out[0] == pytest.approx(expected)
+
+
+def test_filter_range():
+    pts = np.array([[0.5, 0, 0], [2.0, 0, 0], [0, 9.0, 0]], dtype=np.float32)
+    assert len(filter_range(pts, 1.0, 5.0)) == 1
+    assert len(filter_range(pts, 0.0, None)) == 3
 
 
 def test_to_pcd_uncolored_round_trip():

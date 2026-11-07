@@ -115,6 +115,20 @@ def apply_camera_frame_to_attrs(
     return attrs
 
 
+def apply_lidar_frame_to_attrs(
+    config: ComponentConfig, attrs: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Lidars use Isaac-native axes (X forward, Z up) everywhere; with a
+    parent_prim the frame is the pose relative to that prim."""
+    position, quat = frame_pose(config)
+    prefix = "local_" if attrs.get("parent_prim") else ""
+    if position is not None:
+        attrs[f"{prefix}position"] = list(position)
+    if quat is not None:
+        attrs[f"{prefix}orientation_wxyz"] = list(quat)
+    return attrs
+
+
 def validate_sim_component(
     config: ComponentConfig, needs_source: bool = True
 ) -> Tuple[Sequence[str], Sequence[str]]:

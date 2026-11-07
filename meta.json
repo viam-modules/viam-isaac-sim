@@ -20,6 +20,11 @@
       "short_description": "A simulated RGB or RGB-D camera in the Isaac Sim stage"
     },
     {
+      "model": "viam-labs:isaac-sim:lidar",
+      "api": "rdk:component:camera",
+      "short_description": "A simulated RTX lidar (RPLidar, Ouster) serving point clouds"
+    },
+    {
       "model": "viam-labs:isaac-sim:gripper",
       "api": "rdk:component:gripper",
       "short_description": "A simulated UR-mounted Robotiq 2F-85 gripper"
