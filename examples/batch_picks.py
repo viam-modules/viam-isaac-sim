@@ -707,7 +707,21 @@ def perf_report(
     """Whole-run speed from two world status replies around a batch.
 
     A world `reset` during the batch rewinds sim_time and makes sim_s wrong;
-    batch_picks doesn't reset, so don't benchmark a run that does."""
+    batch_picks doesn't reset, so don't benchmark a run that does.
+
+    `run` (from perf_totals deltas) is the client-independent measure: it
+    counts only loop time, so it ignores how long the client pauses physics to
+    plan. `real_time_factor` (sim_time over wall time) includes that paused
+    planning time."""
+    t0, t1 = before.get("perf_totals", {}), after.get("perf_totals", {})
+
+    def delta(key: str) -> float:
+        return float(t1.get(key, 0.0)) - float(t0.get(key, 0.0))
+
+    def ratio(num: float, den: float, scale: float = 1.0) -> float:
+        return scale * num / den if den > 0.0 else 0.0
+
+    loops = delta("loops")
     sim_s = float(after.get("sim_time", 0.0)) - float(before.get("sim_time", 0.0))
     return {
         "wall_s": wall_s,
@@ -715,6 +729,14 @@ def perf_report(
         "real_time_factor": sim_s / wall_s if wall_s > 0.0 else 0.0,
         "window": dict(after.get("perf", {})),
         "settings": dict(after.get("settings", {})),
+        "run": {
+            "loops": loops,
+            "step_ms": ratio(delta("step_s"), loops, 1000.0),
+            "render_hz": ratio(loops, delta("loop_s")),
+            "real_time_factor_playing": ratio(
+                delta("sim_s"), delta("playing_loop_s")
+            ),
+        },
     }
 
 

@@ -33,3 +33,20 @@ def test_window_drops_old_samples():
     now[0] = 3.0
     stats.record(step_s=0.010, loop_s=0.010, sim_dt=0.010)
     assert stats.snapshot()["step_ms"] == pytest.approx(10.0)
+
+
+def test_totals_accumulate_past_window_and_skip_paused_in_playing():
+    now = [0.0]
+    stats = StepStats(window_s=2.0, clock=lambda: now[0])
+    stats.record(step_s=0.1, loop_s=1.0, sim_dt=0.0)  # paused
+    now[0] = 3.0  # prunes the first sample from the window
+    stats.record(step_s=0.2, loop_s=0.5, sim_dt=0.25)
+    assert stats.totals() == pytest.approx(
+        {
+            "loops": 2,
+            "loop_s": 1.5,
+            "step_s": 0.3,
+            "sim_s": 0.25,
+            "playing_loop_s": 0.5,
+        }
+    )

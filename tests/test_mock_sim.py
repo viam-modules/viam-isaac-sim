@@ -82,6 +82,13 @@ def test_world_boots_and_status(world):
         "loop_ms",
         "render_hz",
     }
+    assert set(status["perf_totals"]) == {
+        "loops",
+        "loop_s",
+        "step_s",
+        "sim_s",
+        "playing_loop_s",
+    }
     assert status["settings"]["real_time"] is False
     assert status["settings"]["livestream"] is True
 
