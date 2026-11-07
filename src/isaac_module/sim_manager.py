@@ -964,21 +964,25 @@ class SimManager:
     def _resume_cameras(self, names: Sequence[str]) -> None:
         """Off the sim thread: resume any paused cameras among names and wait
         until they have rendered, so an episode's first sample is fresh."""
-        if self.mock:
-            return
-
-        def resume() -> Future | None:
-            paused = []
+        def paused_handles() -> list["IsaacCameraHandle"]:
+            found = []
             for name in names:
                 entry = self._handles.get(name) if name else None
                 handle = entry[1] if entry else None
                 if isinstance(handle, IsaacCameraHandle) and handle.paused:
-                    paused.append(handle)
+                    found.append(handle)
+            return found
+
+        if threading.get_ident() == self._sim_thread_id:
+            # waiting here would block the loop that must render the frame
+            if paused_handles():
+                raise RuntimeError("cannot resume cameras from the sim thread")
+            return
+
+        def resume() -> Future | None:
+            paused = paused_handles()
             if not paused:
                 return None
-            if threading.get_ident() == self._sim_thread_id:
-                # waiting here would block the loop that must render the frame
-                raise RuntimeError("cannot resume cameras from the sim thread")
             for handle in paused:
                 handle.resume()
                 handle.fresh_from = self._loop_index + IsaacCameraHandle.RESUME_STEPS

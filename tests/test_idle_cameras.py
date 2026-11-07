@@ -172,13 +172,9 @@ def test_resume_cameras_raises_on_sim_thread(mock_sim):
     mock_sim._handles["x"] = ({}, handle)
 
     def task():
-        # the mock path returns early; flip it on the sim thread because
-        # main_loop reads self.mock every iteration and must not see False
-        mock_sim.mock = False
         try:
             mock_sim._resume_cameras(["x"])
         finally:
-            mock_sim.mock = True
             del mock_sim._handles["x"]
 
     with pytest.raises(RuntimeError, match="sim thread"):
@@ -201,3 +197,20 @@ def test_pause_tick_with_zero_idle_sec_pauses_nothing(mock_sim):
 
     mock_sim.run(tick)
     assert idle.paused is False
+
+
+def test_resume_cameras_off_sim_thread_resumes_and_waits_a_step(mock_sim):
+    from isaac_module.sim_manager import IsaacCameraHandle
+
+    cam = FakeCam()
+    handle = IsaacCameraHandle(mock_sim, cam)
+    handle.pause()
+    mock_sim._handles["y"] = ({}, handle)
+    before = mock_sim._loop_index
+    try:
+        mock_sim._resume_cameras(["y"])
+    finally:
+        del mock_sim._handles["y"]
+    assert handle.paused is False
+    assert cam.calls == ["pause", "resume"]
+    assert mock_sim._loop_index > before
