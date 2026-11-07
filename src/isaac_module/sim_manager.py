@@ -377,6 +377,8 @@ class StepStats:
         self._step_s = 0.0
         self._sim_s = 0.0
         self._playing_loop_s = 0.0
+        self._playing_loops = 0
+        self._playing_step_s = 0.0
 
     def record(self, step_s: float, loop_s: float, sim_dt: float) -> None:
         now = self._clock()
@@ -388,6 +390,8 @@ class StepStats:
             self._sim_s += sim_dt
             if sim_dt > 0:
                 self._playing_loop_s += loop_s
+                self._playing_loops += 1
+                self._playing_step_s += step_s
             while now - self._samples[0][0] > self._window_s:
                 self._samples.popleft()
 
@@ -399,6 +403,8 @@ class StepStats:
                 "step_s": self._step_s,
                 "sim_s": self._sim_s,
                 "playing_loop_s": self._playing_loop_s,
+                "playing_loops": self._playing_loops,
+                "playing_step_s": self._playing_step_s,
             }
 
     def snapshot(self) -> dict[str, float]:

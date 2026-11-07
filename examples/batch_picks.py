@@ -710,8 +710,8 @@ def perf_report(
     batch_picks doesn't reset, so don't benchmark a run that does.
 
     `run` (from perf_totals deltas) is the client-independent measure: it
-    counts only loop time, so it ignores how long the client pauses physics to
-    plan. `real_time_factor` (sim_time over wall time) includes that paused
+    covers playing loops only (sim time advanced), so it doesn't depend on
+    client planning pauses; it assumes no module restart during the batch. `real_time_factor` (sim_time over wall time) includes that paused
     planning time."""
     t0, t1 = before.get("perf_totals", {}), after.get("perf_totals", {})
 
@@ -721,7 +721,7 @@ def perf_report(
     def ratio(num: float, den: float, scale: float = 1.0) -> float:
         return scale * num / den if den > 0.0 else 0.0
 
-    loops = delta("loops")
+    playing = delta("playing_loops")
     sim_s = float(after.get("sim_time", 0.0)) - float(before.get("sim_time", 0.0))
     return {
         "wall_s": wall_s,
@@ -730,9 +730,10 @@ def perf_report(
         "window": dict(after.get("perf", {})),
         "settings": dict(after.get("settings", {})),
         "run": {
-            "loops": loops,
-            "step_ms": ratio(delta("step_s"), loops, 1000.0),
-            "render_hz": ratio(loops, delta("loop_s")),
+            "loops": int(playing),
+            "paused_loops": int(delta("loops") - playing),
+            "step_ms": ratio(delta("playing_step_s"), playing, 1000.0),
+            "render_hz": ratio(playing, delta("playing_loop_s")),
             "real_time_factor_playing": ratio(
                 delta("sim_s"), delta("playing_loop_s")
             ),
