@@ -1097,8 +1097,8 @@ async def execute_pick(
         *,
         start_stage: str | None = None,
     ) -> tuple[list[Arm.TrajectoryPoint], float]:
-        """Plan with physics paused; returns the trajectory and the wall
-        seconds spent planning."""
+        """Plan with physics paused, then mark start_stage once play has
+        resumed; returns the trajectory and the wall seconds spent planning."""
         plan_started = time.monotonic()
         if capture_started:
             await world.do_command({"command": "pause"})
@@ -1115,11 +1115,11 @@ async def execute_pick(
                 plan,
                 minimum_duration_sec,
             )
-            if start_stage is not None:
-                await mark_stage(start_stage)
         finally:
             if capture_started:
                 await world.do_command({"command": "play"})
+        if start_stage is not None:
+            await mark_stage(start_stage)
         plan_sec = time.monotonic() - plan_started
         timer.add("plan", plan_sec)
         return trajectory, plan_sec

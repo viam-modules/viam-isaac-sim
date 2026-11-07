@@ -39,12 +39,19 @@ class FakeWorld:
         self.events = events
         self.commands = []
         self.sim_time = 0.0
+        self.playing = True
 
     async def do_command(self, command):
         if command["command"] == "status":
             self.sim_time += 0.25
-            return {"sim_time": self.sim_time, "playing": True}
+            return {"sim_time": self.sim_time, "playing": self.playing}
         self.commands.append(command)
+        if command["command"] == "pause":
+            self.playing = False
+        elif command["command"] == "play":
+            self.playing = True
+        elif command["command"] == "mark_episode_stage" and not self.playing:
+            raise RuntimeError("mark_episode_stage requires the simulation to be playing")
         if self.events is not None:
             self.events.append(f"command:{command['command']}")
         if command["command"] == "set_prop_pose":
@@ -893,8 +900,8 @@ def test_scripted_pick_can_wrap_action_in_native_episode_capture():
         "pause",
         "play",
         "pause",
-        "mark_episode_stage",
         "play",
+        "mark_episode_stage",
         "pause",
         "play",
         "get_prop_pose",
@@ -1074,8 +1081,8 @@ def test_scripted_pick_cosmos_uses_run_root_and_sibling_tree(tmp_path, monkeypat
         "pause",
         "play",
         "pause",
-        "mark_episode_stage",
         "play",
+        "mark_episode_stage",
         "pause",
         "play",
         "get_prop_pose",
