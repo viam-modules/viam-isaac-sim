@@ -7,7 +7,13 @@ from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
 from isaac_module.models.world import IsaacWorld
-from isaac_module.sim_manager import SimManager, kit_settings_argv, validate_kit_settings
+from isaac_module.sim_manager import (
+    RENDER_QUALITY_PRESETS,
+    SimManager,
+    kit_settings_argv,
+    kit_settings_for,
+    validate_kit_settings,
+)
 
 
 def _config(attrs):
@@ -95,20 +101,17 @@ def test_apply_kit_settings_per_key(monkeypatch, caplog):
     assert "'/a': {'before': 1, 'after': 10}" in text
 
 
-from isaac_module.sim_manager import RENDER_QUALITY_PRESETS, kit_settings_for
-
-
 def test_default_quality_applies_only_user_settings():
     assert kit_settings_for("default", {"/x": True}) == {"/x": True}
 
 
 def test_performance_preset_merged_and_user_wins():
     merged = kit_settings_for("performance", {"/rtx/reflections/enabled": True})
-    assert merged["/rtx/reflections/enabled"] is True
-    preset = RENDER_QUALITY_PRESETS["performance"]
-    assert {k: v for k, v in merged.items() if k != "/rtx/reflections/enabled"} == {
-        k: v for k, v in preset.items() if k != "/rtx/reflections/enabled"
-    }
+    assert merged == {**RENDER_QUALITY_PRESETS["performance"], "/rtx/reflections/enabled": True}
+
+
+def test_performance_preset_is_valid():
+    validate_kit_settings(RENDER_QUALITY_PRESETS["performance"])
 
 
 def test_unknown_quality_rejected():
@@ -116,3 +119,5 @@ def test_unknown_quality_rejected():
         kit_settings_for("ultra", {})
     with pytest.raises(ValueError):
         IsaacWorld.validate_config(_config({"render_quality": "ultra"}))
+    with pytest.raises(ValueError):
+        IsaacWorld.validate_config(_config({"render_quality": ["performance"]}))
