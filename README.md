@@ -23,7 +23,7 @@ What it is/does
 | `viam-labs:isaac-sim:world` | `generic` | Boots Isaac Sim, opens the USD stage, runs the sim loop. Configure exactly one. |
 | `viam-labs:isaac-sim:arm` | `arm` | Spawns (or attaches to) an articulation - UR arms, Franka, or any USD - and exposes joint control. |
 | `viam-labs:isaac-sim:gripper` | `gripper` | Exposes a supported parallel gripper, including the Lite 6's integrated gripper. |
-| `viam-labs:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves its RGB frames. |
+| `viam-labs:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves RGB, and optionally depth and point clouds. |
 | `viam-labs:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
 | `viam-labs:isaac-sim:motor` | `motor` | A thruster that pushes a rigid body (a floating prop, say); two of them steer by differential thrust. |
 | `viam-labs:isaac-sim:movement_sensor` | `movement_sensor` | GPS, IMU and compass readings from a rigid body. |
@@ -312,6 +312,49 @@ Frame pose, `target`, `fov_deg`, and `near_clip_m` updates apply live when no
 episode is being captured. Changing `prim_path`, `parent_prim`, `width`, or
 `height` requires restarting the module. Camera changes are rejected during
 native or CosmosWriter episode capture.
+
+`depth: true` (restart to change) also serves a depth image and point clouds.
+`get_images` returns sources named `color` and `depth` (`image/vnd.viam.dep`),
+matching the RealSense module and what `detections-to-segments` expects;
+RGB-only cameras keep a single `<name>` source, and honors `filter_source_names`; `get_point_cloud`
+returns a PCD in meters in the camera's frame. `max_depth_m` (needs `depth`,
+must be > 0) drops points beyond that range and zeroes those pixels in the depth
+image. `depth_first: true` (needs `depth`) returns `depth` before `color`, for
+consumers that decode only the first image, such as `obstacles-depth`.
+`get_properties` reports `supports_pcd` and the pinhole intrinsics
+(`width_px`, `height_px`, `focal_x_px`, `focal_y_px`, `center_x_px`,
+`center_y_px`). Without `depth`, `get_point_cloud` is not implemented.
+
+**Breaking change / migration:** a fixed camera oriented through the standard
+`frame` now uses Viam's camera convention, Z out of the lens (X right, Y down),
+matching real cameras and Viam's `obstacles_depth`; this is the same optical
+convention parented cameras' copied frames already use. Previously the frame was
+read in Isaac's world camera axes (X forward, Z up). Re-express those
+orientations: a camera that used to have identity orientation (looking along
+world +X, level) now needs orientation vector `(1, 0, 0)` with theta `-90`
+degrees:
+
+```json
+"frame": { "parent": "world", "orientation": { "type": "ov_degrees",
+  "value": { "x": 1, "y": 0, "z": 0, "th": -90 } } }
+```
+
+An identity/default frame orientation is treated as unset for fixed cameras (so
+`target` and translation-only frames keep working); set a non-identity
+orientation to orient the camera via the frame.
+
+Cameras placed with `target`, legacy `orientation_rpy_deg`/`orientation_wxyz`,
+or `parent_prim` are unaffected by the convention change. Check local sim
+configs such as the `lite6-sim-real-mapping.json` templates.
+
+A camera's point cloud is returned in the axes Isaac posed it with, and Viam
+places it using the component's frame. That only lines up when the camera's
+orientation comes from the standard frame (fixed cameras) or the camera is
+parented through a frame (`parent_prim` plus a non-world frame parent). Cameras
+placed with `target` or legacy `orientation_*` / `local_orientation_rpy_deg`
+attributes have a look-at or legacy rotation Viam's frame system doesn't know
+about, so both `obstacles_depth` and `obstacles_pointcloud` will place their
+obstacles rotated. Orient such cameras with the standard frame instead.
 
 ### Policy execution
 
@@ -833,6 +876,6 @@ python3 -m venv .venv
 - [x] cloud builds / registry publishing (tag a release)
 - [x] serve kinematics files (`GetKinematics`) so Viam's motion service can do
       IK and planning for simulated arms (all motion stays in Viam, not Isaac)
-- [ ] depth / point clouds from cameras
+- [x] depth / point clouds from cameras
 - [x] floating props (buoyancy + drag), thruster motors, GPS/IMU movement sensor, water
 - [x] UR-mounted Robotiq 2F-85 gripper support

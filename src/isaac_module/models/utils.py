@@ -4,7 +4,15 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import struct_to_dict
 
-from ..spatial import Quat, Vec3, ov_to_quat, quat_from_axis_angle, quat_mul
+from ..spatial import (
+    Quat,
+    Vec3,
+    ov_to_quat,
+    quat_from_axis_angle,
+    quat_from_euler_deg,
+    quat_mul,
+    quat_rotate,
+)
 
 
 def get_attrs(config: ComponentConfig) -> Dict[str, Any]:
@@ -47,6 +55,15 @@ def frame_pose(config: ComponentConfig) -> Tuple[Optional[Vec3], Optional[Quat]]
     return position, quat
 
 
+def camera_frame_orientation(config: ComponentConfig) -> Optional[Quat]:
+    """Frame orientation for an unparented camera; viam-server fills in an
+    identity quaternion when the user set none, so identity means unset."""
+    quat = frame_pose(config)[1]
+    if quat is None or abs(abs(quat[0]) - 1) < 1e-9:
+        return None
+    return quat
+
+
 def apply_frame_to_attrs(
     config: ComponentConfig, attrs: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -71,13 +88,31 @@ def apply_camera_frame_to_attrs(
         position, quat = frame_pose(config)
         attrs.pop("local_position", None)
         attrs.pop("local_orientation_rpy_deg", None)
+        # The Viam parent frame can sit rotated inside the prim (e.g. an arm's
+        # end frame vs its USD flange link); rotate the frame's pose into the
+        # prim's coordinates so the sim and the frame system agree.
+        offset = attrs.pop("parent_prim_rpy_deg", None)
+        if offset is not None:
+            r = quat_from_euler_deg(*(float(v) for v in offset))
+            if position is not None:
+                position = quat_rotate(r, position)
+            quat = quat_mul(r, quat if quat is not None else (1.0, 0.0, 0.0, 0.0))
         if position is not None:
             attrs["local_position"] = list(position)
         if quat is not None:
             attrs["local_orientation_wxyz"] = list(quat)
         attrs["local_camera_axes"] = "ros"
         return attrs
-    return apply_frame_to_attrs(config, attrs)
+    position, _ = frame_pose(config)
+    quat = camera_frame_orientation(config)
+    if position is not None:
+        attrs["position"] = list(position)
+    # Viam camera frames have Z out of the lens (optical), like real cameras;
+    # target / legacy orientations keep Isaac "world" camera axes.
+    if quat is not None:
+        attrs["orientation_wxyz"] = list(quat)
+        attrs["camera_axes"] = "ros"
+    return attrs
 
 
 def validate_sim_component(
