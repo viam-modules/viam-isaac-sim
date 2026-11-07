@@ -1721,6 +1721,8 @@ class SimManager:
                 self._add_fallback_lighting()
         for prop in self._prop_specs.values():
             self._spawn_prop(prop)
+        if cfg.headless and not cfg.livestream:
+            self._disable_viewport()
         self.world.reset()
         LOGGER.info("isaac sim world ready")
 
@@ -1760,6 +1762,23 @@ class SimManager:
         )
         self.world.scene.add(seabed)
         LOGGER.info("water surface at z=%.2f m, seabed %.1f m below", level, depth)
+
+    def _disable_viewport(self) -> None:
+        """Headless with no livestream: nobody can see the viewport, so stop
+        rendering it (Isaac Lab does the same for headless camera runs)."""
+        try:
+            from omni.kit.viewport.utility import get_active_viewport
+
+            viewport = get_active_viewport()
+            # hasattr: assigning to a missing property would silently create
+            # a plain attribute and log a false "disabled"
+            if viewport is None or not hasattr(viewport, "updates_enabled"):
+                LOGGER.info("no active viewport with updates_enabled; not disabled")
+                return
+            viewport.updates_enabled = False
+            LOGGER.info("viewport updates disabled (headless, no livestream)")
+        except Exception:
+            LOGGER.exception("could not disable the viewport; continuing")
 
     def _apply_kit_settings(self, settings: Mapping[str, KitValue]) -> None:
         """Set again after the stage opens, since stage render settings can
