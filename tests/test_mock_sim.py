@@ -88,6 +88,8 @@ def test_world_boots_and_status(world):
         "step_s",
         "sim_s",
         "playing_loop_s",
+        "playing_loops",
+        "playing_step_s",
     }
     assert status["settings"]["real_time"] is False
     assert status["settings"]["livestream"] is True

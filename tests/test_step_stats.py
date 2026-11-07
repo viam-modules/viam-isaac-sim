@@ -48,5 +48,7 @@ def test_totals_accumulate_past_window_and_skip_paused_in_playing():
             "step_s": 0.3,
             "sim_s": 0.25,
             "playing_loop_s": 0.5,
+            "playing_loops": 1,
+            "playing_step_s": 0.2,
         }
     )
