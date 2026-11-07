@@ -3,7 +3,12 @@ import math
 import pytest
 from test_arm_is_moving import _FakeArt, _FakeSim
 
-from isaac_module.sim_manager import IsaacArmHandle, JointTrajectoryPoint, ramp_toward
+from isaac_module.sim_manager import (
+    IsaacArmHandle,
+    JointTrajectoryPoint,
+    SimManager,
+    ramp_toward,
+)
 
 
 def test_scales_all_joints_along_the_segment():
@@ -109,3 +114,19 @@ def test_set_joint_targets_rejects_non_finite(bad):
     with pytest.raises(ValueError, match="finite"):
         h.set_joint_targets([0.0, bad])
     assert h._target is None
+
+
+def test_reset_world_clears_ramp_state_before_resetting():
+    mgr = SimManager()
+    seen = []
+    sim, art, h = _handle(max_joint_deg_s=60.0)
+    h.set_joint_targets([1.0, 1.0])
+
+    class World:
+        def reset(self):
+            seen.append((h._target, h._commanded))
+
+    mgr.world = World()
+    mgr._handles["arm"] = ({}, h)
+    mgr._reset_world()
+    assert seen == [(None, None)]  # cleared before world.reset ran

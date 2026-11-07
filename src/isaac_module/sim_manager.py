@@ -583,7 +583,7 @@ def _get_or_add_xform_op(
 
 
 def _reset_articulation_at_pose(
-    world: Any,
+    reset: Callable[[], None],
     articulation: Any,
     position: Sequence[float],
     orientation: Sequence[float] | None,
@@ -592,7 +592,7 @@ def _reset_articulation_at_pose(
     if orientation is not None:
         pose["orientation"] = list(orientation)
     articulation.set_default_state(**pose)
-    world.reset()
+    reset()
     articulation.set_world_pose(**pose)
 
 
@@ -2210,10 +2210,19 @@ class SimManager:
         self._require_booted()
         return self.run(lambda: bool(self.world.is_playing()))
 
+    def _reset_world(self) -> None:
+        """world.reset() returns joints to their defaults; clear arm ramp state
+        first so no ramp step drives toward a pose that no longer exists."""
+        for _, handle in list(self._handles.values()):
+            if isinstance(handle, IsaacArmHandle):
+                handle._target = None
+                handle._commanded = None
+        self.world.reset()
+
     def reset(self) -> None:
         self._require_booted()
         if not self.mock:
-            self.run(lambda: self.world.reset())
+            self.run(self._reset_world)
 
     def sim_time_s(self) -> float:
         """Simulator seconds since boot; safe to call from any thread."""
@@ -2527,7 +2536,7 @@ class SimManager:
 
         art = self._isaac.SingleArticulation(prim_path=prim_path, name=name)
         self.world.scene.add(art)
-        _reset_articulation_at_pose(self.world, art, position, orientation)
+        _reset_articulation_at_pose(self._reset_world, art, position, orientation)
 
         ee = None
         ee_path = attrs.get("end_effector_prim")
@@ -2733,7 +2742,7 @@ class SimManager:
             )
         # Editing collision prims invalidates Isaac's live tensor view. Rebuild
         # it before reading DOF names or limits from the articulation wrapper.
-        self.world.reset()
+        self._reset_world()
         if contact_view is not None:
             contact_view.initialize()
         arm.refresh_dofs()
@@ -2863,7 +2872,7 @@ class SimManager:
         articulation_view._is_initialized = False
         articulation_view._physics_view = None
         articulation_view._default_joints_state = None
-        self.world.reset()
+        self._reset_world()
         arm.refresh_dofs()
         articulation = arm._art
 
@@ -3220,7 +3229,7 @@ class SimManager:
             base_kwargs["orientation"] = [float(v) for v in attrs["orientation_wxyz"]]
         robot = self._isaac.WheeledRobot(**base_kwargs)
         self.world.scene.add(robot)
-        self.world.reset()
+        self._reset_world()
 
         controller = self._isaac.DifferentialController(
             name=f"{name}_controller",
@@ -3789,6 +3798,8 @@ class IsaacArmHandle(ArmHandle):
                 self._commanded = list(positions)
                 self._apply_commanded()
             elif self._commanded is None:
+                # Measured pose includes any active nudge; negligible, since no
+                # nudge is applied while the target is None (e.g. after a reset).
                 self._commanded = self._positions_on_sim_thread()
 
         self._sim.run(_apply)
