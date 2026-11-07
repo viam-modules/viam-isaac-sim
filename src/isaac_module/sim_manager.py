@@ -3741,13 +3741,17 @@ class IsaacArmHandle(ArmHandle):
         self._trajectory_elapsed_s = 0.0
         self._trajectory_future: Future[None] | None = None
         self._trajectory_attached = False
+        self._ramp_callback_name = f"arm_ramp_{id(self)}"
+        if self._max_joint_rad_s is not None:
+            # Never detached: handles live as long as the module.
+            self._sim.world.add_physics_callback(
+                self._ramp_callback_name, self._on_ramp_step
+            )
 
     def joint_names(self) -> tuple[str, ...]:
         return self._joint_names
 
     def refresh_dofs(self) -> None:
-        import numpy as np
-
         names = list(self._art.dof_names)
         missing = [name for name in self._joint_names if name not in names]
         if missing:
@@ -3755,11 +3759,8 @@ class IsaacArmHandle(ArmHandle):
                 f"arm joints {missing} not found in articulation dof_names: {names}"
             )
         self._joint_indices = [names.index(name) for name in self._joint_names]
-        if self._max_joint_rad_s is not None:
-            self._art._articulation_view.set_max_joint_velocities(
-                np.full((1, len(self._joint_indices)), self._max_joint_rad_s),
-                joint_indices=np.asarray(self._joint_indices),
-            )
+        # No PhysX max-velocity clamp: it fights the stiff drive and slows the
+        # arm far below the limit, so _on_ramp_step limits speed instead.
 
     def _positions_on_sim_thread(self) -> list[float]:
         return [
@@ -3778,13 +3779,28 @@ class IsaacArmHandle(ArmHandle):
 
         def _apply():
             self._target = list(positions)
-            self._commanded = list(positions)
-            self._apply_commanded()
+            if self._max_joint_rad_s is None:
+                self._commanded = list(positions)
+                self._apply_commanded()
+            elif self._commanded is None:
+                self._commanded = self._positions_on_sim_thread()
 
         self._sim.run(_apply)
 
+    def _on_ramp_step(self, step_size: float) -> None:
+        commanded, target = self._commanded, self._target
+        if commanded is None or target is None or commanded == target:
+            return
+        try:
+            self._commanded = ramp_toward(
+                commanded, target, self._max_joint_rad_s * float(step_size)
+            )
+            self._apply_commanded()
+        except Exception:
+            LOGGER.exception("arm %s ramp step failed", self._prim_path)
+
     def _apply_commanded(self, action: Any = None) -> None:
-        """Drive toward the clean target plus any active nudge offset."""
+        """Drive toward the commanded (ramped) target plus any active nudge offset."""
         import numpy as np
 
         assert self._commanded is not None
@@ -4031,6 +4047,10 @@ class IsaacArmHandle(ArmHandle):
                 raw_values = values(method_names)
                 if raw_values is not None:
                     result[key] = raw_values
+            if self._max_joint_rad_s is not None:
+                result["max_velocity_rad_s"] = [self._max_joint_rad_s] * len(
+                    self._joint_indices
+                )
             if self._max_joint_acceleration_rad_s2 is not None:
                 result["max_acceleration_rad_s2"] = [
                     self._max_joint_acceleration_rad_s2

@@ -1,3 +1,5 @@
+import math
+
 import pytest
 from test_arm_is_moving import _FakeArt, _FakeSim
 
@@ -54,3 +56,44 @@ def test_stop_holds_measured_minus_nudge():
     h.stop()
     assert h._target == pytest.approx([0.4, 0.4])
     assert h._commanded == pytest.approx([0.4, 0.4])
+
+
+def test_limit_ramps_target_by_v_dt_per_step():
+    sim, art, h = _handle(max_joint_deg_s=60.0)  # 60 deg/s
+    name = f"arm_ramp_{id(h)}"
+    assert list(sim.world.callbacks) == [name]
+    h.set_joint_targets([math.radians(30), 0.0])
+    assert art.actions == []  # goal not applied immediately
+    step = sim.world.callbacks[name]
+    step(0.1)  # 6 deg
+    assert art.actions[-1].joint_positions.tolist() == pytest.approx(
+        [math.radians(6), 0.0]
+    )
+    for _ in range(10):
+        step(0.1)
+    assert h._commanded == h._target
+    applied = len(art.actions)
+    step(0.1)
+    assert len(art.actions) == applied  # idle once arrived
+
+
+def test_latch_after_trajectory_ramps_from_trajectory_pose():
+    sim, art, h = _handle(max_joint_deg_s=60.0)
+    h.start_trajectory((JointTrajectoryPoint(0.0, (0.5, 0.0)),))
+    traj = next(
+        cb for n, cb in sim.world.callbacks.items() if n.startswith("arm_trajectory")
+    )
+    traj(0.01)
+    h.set_joint_targets([0.0, 0.0])
+    sim.world.callbacks[f"arm_ramp_{id(h)}"](0.1)
+    assert h._commanded == pytest.approx([0.5 - math.radians(6), 0.0])
+
+
+def test_nudge_rides_on_ramped_target():
+    sim, art, h = _handle(max_joint_deg_s=60.0)
+    h.set_joint_targets([1.0, 0.0])
+    h.set_nudge([0.0, 0.2])
+    sim.world.callbacks[f"arm_ramp_{id(h)}"](0.1)
+    assert art.actions[-1].joint_positions.tolist() == pytest.approx(
+        [math.radians(6), 0.2]
+    )
