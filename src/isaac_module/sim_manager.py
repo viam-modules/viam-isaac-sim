@@ -3798,8 +3798,9 @@ class IsaacArmHandle(ArmHandle):
                 self._commanded = list(positions)
                 self._apply_commanded()
             elif self._commanded is None:
-                # Measured pose includes any active nudge; negligible, since no
-                # nudge is applied while the target is None (e.g. after a reset).
+                # Measured pose includes any active nudge. A nudge stored across
+                # a reset is re-applied in one step on the next command; nudges
+                # are small, so that is negligible.
                 self._commanded = self._positions_on_sim_thread()
 
         self._sim.run(_apply)
