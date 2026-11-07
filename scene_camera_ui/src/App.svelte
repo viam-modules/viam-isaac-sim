@@ -45,8 +45,12 @@
 
   // the request never reached the machine (or its answer was lost): not a verdict on the view
   const TRANSPORT_ERRORS = new Set(['not-connected', 'disconnected', 'timeout']);
-  const isTransportError = (error: unknown) =>
-    TRANSPORT_ERRORS.has(String((error as { kind?: unknown } | null)?.kind));
+  // a `cause` means the bridge could not post the request at all (e.g. it could not be
+  // cloned); retrying would fail the same way, so that is surfaced, not retried
+  const isTransportError = (error: unknown) => {
+    const e = error as { kind?: unknown; cause?: unknown } | null;
+    return TRANSPORT_ERRORS.has(String(e?.kind)) && e?.cause === undefined;
+  };
 
   /** Returns true when the request should be retried rather than rolled back. */
   function fail(error: unknown): boolean {
@@ -64,7 +68,9 @@
   }
 
   async function run(cmd: object): Promise<ViewReply> {
-    return (await command.mutateAsync([cmd as Record<string, JsonValue>])) as unknown as ViewReply;
+    // views come from $state, whose proxies postMessage cannot clone; send a plain copy
+    const plain = $state.snapshot(cmd) as Record<string, JsonValue>;
+    return (await command.mutateAsync([plain])) as unknown as ViewReply;
   }
 
   // always the whole view: set_view is absolute, so any later success heals a lost request

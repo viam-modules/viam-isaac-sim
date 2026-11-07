@@ -105,6 +105,26 @@ describe('App', () => {
     expect(screen.getByText('-30.0°')).toBeTruthy();
   });
 
+  it('sends a payload postMessage can clone (no reactive proxies)', async () => {
+    render(App);
+    drag(100); // orbit keeps the existing target array
+    await flush();
+    const [args] = state.mutateAsync.mock.calls.at(-1) as [unknown];
+    expect(() => structuredClone(args)).not.toThrow();
+  });
+
+  it('surfaces a request the bridge could not post instead of retrying it silently', async () => {
+    const unpostable = Object.assign(new Error('Failed to post request to the host.'), {
+      kind: 'not-connected',
+      cause: new Error('could not be cloned'),
+    });
+    state.mutateAsync = vi.fn().mockRejectedValue(unpostable);
+    render(App);
+    drag(100);
+    await flush();
+    expect(screen.getByRole('alert').textContent).toContain('Failed to post');
+  });
+
   it('sends the whole view, so a later request heals an earlier lost one', async () => {
     render(App);
     drag(100);
