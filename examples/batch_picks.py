@@ -711,7 +711,8 @@ def perf_report(
 
     `run` (from perf_totals deltas) is the client-independent measure: it
     covers playing loops only (sim time advanced), so it doesn't depend on
-    client planning pauses; it assumes no module restart during the batch. `real_time_factor` (sim_time over wall time) includes that paused
+    client planning pauses; it assumes no module restart during the batch.
+    `real_time_factor` (sim_time over wall time) includes that paused
     planning time."""
     t0, t1 = before.get("perf_totals", {}), after.get("perf_totals", {})
 

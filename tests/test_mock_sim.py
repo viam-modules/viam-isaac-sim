@@ -3,6 +3,7 @@ background thread (standing in for the process main thread) and exercises
 the viam component models against it."""
 
 import asyncio
+import dataclasses
 import math
 import threading
 import time
@@ -20,6 +21,7 @@ from isaac_module.models.world import IsaacWorld
 from isaac_module.sim_manager import (
     SimConfig,
     SimManager,
+    _STATUS_SETTINGS,
     _visual_material_properties,
     RealTimePacer,
     parse_markers,
@@ -520,3 +522,8 @@ def test_capture_after_render_samples_once_per_capture_period():
         manager._capture_after_render()
     manager._capture_after_render()
     assert len(sampled) == 5
+
+
+def test_status_settings_are_simconfig_fields():
+    names = {f.name for f in dataclasses.fields(SimConfig)}
+    assert set(_STATUS_SETTINGS) <= names
