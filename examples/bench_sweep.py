@@ -1,6 +1,6 @@
 """Deterministic sim-loop benchmark: sweep the arm base yaw with both cameras recording.
 
-No grasping, no world reset, no home pose.
+No grasping, no world reset, no home pose. Time-based: latches targets and holds.
 """
 
 from __future__ import annotations
@@ -8,11 +8,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import sys
 import time
 
-from viam.components.arm import Arm, JointPositions
+from viam.components.arm import Arm
 from viam.components.generic import Generic
 from viam.robot.client import RobotClient
 from viam.rpc.dial import DialOptions
@@ -31,6 +32,76 @@ def sweep_waypoints(
     return [[yaw, *current[1:]] for yaw in [*yaws, current[0]]]
 
 
+def _err(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
+async def _latch(arm, deg: list[float]) -> None:
+    await arm.do_command(
+        {"command": "set_joint_targets_radians", "values": [math.radians(d) for d in deg]}
+    )
+
+
+async def _run(args: argparse.Namespace, world, arm) -> dict:
+    # Fixed start pose (straight up, wrist unfolded); the settle is not measured.
+    start = [0.0] * 6
+    await _latch(arm, start)
+    await asyncio.sleep(args.settle_sec)
+    before = await world.do_command({"command": "status"})
+    started = time.monotonic()
+    wps = sweep_waypoints(start, args.amplitude_deg, args.cycles)
+    error = None
+    try:
+        pose = (await world.do_command({"command": "get_prop_pose", "prop": args.prop}))[
+            "pose"
+        ]
+        await world.do_command(
+            {
+                "command": "start_episode",
+                "output_dir": args.output_dir,
+                "episode_id": str(int(time.time())),
+                "seed": 0,
+                "task": "perf sweep",
+                "arm": args.arm,
+                "gripper": args.gripper,
+                "fixed_camera": args.fixed_camera,
+                "wrist_camera": args.wrist_camera,
+                "target": {
+                    "prop_name": args.prop,
+                    "position_m": pose["position"],
+                    "rotation_wxyz": pose["orientation_wxyz"],
+                },
+            }
+        )
+        try:
+            for wp in wps:
+                await _latch(arm, wp)
+                await asyncio.sleep(args.hold_sec)
+        finally:
+            try:
+                await world.do_command(
+                    {"command": "stop_episode", "outcome": "incomplete"}
+                )
+            except Exception as exc:
+                error = error or _err(exc)
+    except Exception as exc:
+        error = _err(exc)
+    wall_s = time.monotonic() - started
+    perf = None
+    try:
+        after = await world.do_command({"command": "status"})
+        perf = perf_report(before, after, wall_s)
+    except Exception as exc:
+        error = error or _err(exc)
+    return {
+        "perf": perf,
+        "waypoints": len(wps),
+        "start_joints_deg": start,
+        "hold_sec": args.hold_sec,
+        "error": error,
+    }
+
+
 async def _main(args: argparse.Namespace) -> dict:
     api_key = os.environ.get("VIAM_API_KEY")
     api_key_id = os.environ.get("VIAM_API_KEY_ID")
@@ -41,56 +112,15 @@ async def _main(args: argparse.Namespace) -> dict:
         if api_key and api_key_id
         else RobotClient.Options(dial_options=DialOptions(insecure=True))
     )
+    if args.disable_webrtc:
+        assert options.dial_options is not None
+        options.dial_options.disable_webrtc = True
     async with await RobotClient.at_address(args.address, options) as machine:
-        world = Generic.from_robot(machine, args.world)
-        arm = Arm.from_robot(machine, args.arm)
-        before = await world.do_command({"command": "status"})
-        started = time.monotonic()
-        wps: list[list[float]] = []
-        error = None
-        try:
-            current = list((await arm.get_joint_positions()).values)
-            wps = sweep_waypoints(current, args.amplitude_deg, args.cycles)
-            pose = (
-                await world.do_command({"command": "get_prop_pose", "prop": args.prop})
-            )["pose"]
-            await world.do_command(
-                {
-                    "command": "start_episode",
-                    "output_dir": args.output_dir,
-                    "episode_id": "000000",
-                    "seed": 0,
-                    "task": "perf sweep",
-                    "arm": args.arm,
-                    "gripper": args.gripper,
-                    "fixed_camera": args.fixed_camera,
-                    "wrist_camera": args.wrist_camera,
-                    "target": {
-                        "prop_name": args.prop,
-                        "position_m": pose["position"],
-                        "rotation_wxyz": pose["orientation_wxyz"],
-                    },
-                }
-            )
-            try:
-                for wp in wps:
-                    await arm.move_to_joint_positions(JointPositions(values=wp))
-            finally:
-                try:
-                    await world.do_command(
-                        {"command": "stop_episode", "outcome": "incomplete"}
-                    )
-                except Exception as exc:  # report, don't mask an earlier error
-                    print(f"stop_episode failed: {exc}", file=sys.stderr)
-        except Exception as exc:
-            error = str(exc)
-        after = await world.do_command({"command": "status"})
-        wall_s = time.monotonic() - started
-    return {
-        "perf": perf_report(before, after, wall_s),
-        "waypoints": len(wps),
-        "error": error,
-    }
+        return await _run(
+            args,
+            Generic.from_robot(machine, args.world),
+            Arm.from_robot(machine, args.arm),
+        )
 
 
 def main() -> int:
@@ -105,7 +135,14 @@ def main() -> int:
     p.add_argument("--fixed-camera", default="scene-cam")
     p.add_argument("--wrist-camera", default="wrist-cam")
     p.add_argument("--prop", default="pick_block")
-    result = asyncio.run(_main(p.parse_args()))
+    p.add_argument("--settle-sec", type=float, default=5.0)
+    p.add_argument("--hold-sec", type=float, default=3.0)
+    p.add_argument("--disable-webrtc", action="store_true")
+    args = p.parse_args()
+    try:
+        result = asyncio.run(_main(args))
+    except Exception as exc:
+        result = {"perf": None, "waypoints": 0, "error": _err(exc)}
     print(json.dumps(result))
     return 1 if result["error"] else 0
 
