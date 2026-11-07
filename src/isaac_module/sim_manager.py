@@ -371,13 +371,35 @@ class StepStats:
         self._lock = threading.Lock()
         # (recorded_at, step_s, loop_s, sim_dt)
         self._samples: deque[tuple[float, float, float, float]] = deque()
+        # cumulative since boot; never pruned
+        self._loops = 0
+        self._loop_s = 0.0
+        self._step_s = 0.0
+        self._sim_s = 0.0
+        self._playing_loop_s = 0.0
 
     def record(self, step_s: float, loop_s: float, sim_dt: float) -> None:
         now = self._clock()
         with self._lock:
             self._samples.append((now, step_s, loop_s, sim_dt))
+            self._loops += 1
+            self._loop_s += loop_s
+            self._step_s += step_s
+            self._sim_s += sim_dt
+            if sim_dt > 0:
+                self._playing_loop_s += loop_s
             while now - self._samples[0][0] > self._window_s:
                 self._samples.popleft()
+
+    def totals(self) -> dict[str, float]:
+        with self._lock:
+            return {
+                "loops": self._loops,
+                "loop_s": self._loop_s,
+                "step_s": self._step_s,
+                "sim_s": self._sim_s,
+                "playing_loop_s": self._playing_loop_s,
+            }
 
     def snapshot(self) -> dict[str, float]:
         with self._lock:
@@ -1964,6 +1986,7 @@ class SimManager:
             "mock": self.mock,
             "error": str(self._boot_error) if self._boot_error else "",
             "perf": self._stats.snapshot(),
+            "perf_totals": self._stats.totals(),
         }
         if self.cfg is not None:
             out["settings"] = {
