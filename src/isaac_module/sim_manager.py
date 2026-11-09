@@ -315,6 +315,43 @@ def _reset_articulation_at_pose(
     articulation.set_world_pose(**pose)
 
 
+def _author_initial_joint_state(
+    asset_prim: Any, joint_names: Sequence[str], positions_deg: Sequence[float]
+) -> None:
+    """Write each joint's start position and drive target (degrees) to USD.
+    PhysX starts the arm there, and Isaac derives the post-reset joint state
+    from the drive targets, so world.reset() returns here too."""
+    from pxr import PhysxSchema, Usd, UsdPhysics
+
+    if len(positions_deg) != len(joint_names):
+        raise ValueError(
+            f"initial_joint_positions_deg needs {len(joint_names)} values "
+            f"({', '.join(joint_names)}), got {len(positions_deg)}"
+        )
+    joints = {
+        prim.GetName(): prim
+        for prim in Usd.PrimRange(asset_prim)
+        if prim.IsA(UsdPhysics.Joint)
+    }
+    for name, degrees in zip(joint_names, positions_deg):
+        joint = joints.get(name)
+        if joint is None:
+            raise ValueError(
+                f"initial_joint_positions_deg: joint {name!r} not found under "
+                f"{asset_prim.GetPath()}"
+            )
+        if not joint.IsA(UsdPhysics.RevoluteJoint):
+            raise ValueError(
+                f"initial_joint_positions_deg: joint {name!r} is not revolute"
+            )
+        UsdPhysics.DriveAPI.Apply(joint, "angular").CreateTargetPositionAttr(
+            float(degrees)
+        )
+        state = PhysxSchema.JointStateAPI.Apply(joint, "angular")
+        state.CreatePositionAttr(float(degrees))
+        state.CreateVelocityAttr(0.0)
+
+
 def camera_axes(attrs: dict[str, Any]) -> str:
     """The Isaac camera_axes a camera is posed in; point clouds are returned
     in the same axes so Viam's frame system places them correctly."""
@@ -1961,6 +1998,19 @@ class SimManager:
                         f"{variant_set}={selection!r}"
                     )
 
+        initial_deg = attrs.get("initial_joint_positions_deg")
+        if initial_deg is not None:
+            if not meta.get("joint_names"):
+                raise ValueError(
+                    f"arm {name!r}: initial_joint_positions_deg needs a known "
+                    "asset so the joint order is defined"
+                )
+            _author_initial_joint_state(
+                self._isaac.get_prim_at_path(prim_path),
+                meta["joint_names"],
+                [float(v) for v in initial_deg],
+            )
+
         # Set the base pose directly on the USD prim. The `position=` /
         # `orientation=` kwargs on SingleArticulation don't persist across the
         # world.reset() below when another articulation is already in the
@@ -2008,6 +2058,11 @@ class SimManager:
             max_joint_deg_s2=(
                 float(attrs["max_joint_deg_s2"])
                 if "max_joint_deg_s2" in attrs
+                else None
+            ),
+            initial_target=(
+                [math.radians(float(v)) for v in initial_deg]
+                if initial_deg is not None
                 else None
             ),
         )
@@ -3032,6 +3087,7 @@ class IsaacArmHandle(ArmHandle):
         ),
         max_joint_deg_s: float | None = None,
         max_joint_deg_s2: float | None = None,
+        initial_target: Sequence[float] | None = None,
     ) -> None:
         if (
             not math.isfinite(is_moving_velocity_threshold_rad_s)
@@ -3062,7 +3118,9 @@ class IsaacArmHandle(ArmHandle):
             math.radians(max_joint_deg_s2) if max_joint_deg_s2 is not None else None
         )
         self.refresh_dofs()
-        self._target: list[float] | None = None
+        self._target: list[float] | None = (
+            list(initial_target) if initial_target is not None else None
+        )
         self._nudge: list[float] | None = None
         self._trajectory_callback_name = f"arm_trajectory_{id(self)}"
         self._trajectory: list[tuple[float, Any, tuple[float, ...]]] = []
@@ -3443,8 +3501,17 @@ class MockArmHandle(ArmHandle):
             else None
         )
         self._lock = threading.Lock()
-        self._start = [0.0] * dof
-        self._target = [0.0] * dof
+        initial_deg = attrs.get("initial_joint_positions_deg")
+        if initial_deg is not None and len(initial_deg) != dof:
+            raise ValueError(
+                f"initial_joint_positions_deg needs {dof} values, got {len(initial_deg)}"
+            )
+        self._start = (
+            [math.radians(float(v)) for v in initial_deg]
+            if initial_deg is not None
+            else [0.0] * dof
+        )
+        self._target = list(self._start)
         self._t0 = time.monotonic()
         self._trajectory_callback_name = f"arm_trajectory_{id(self)}"
         self._trajectory: tuple[JointTrajectoryPoint, ...] = ()
