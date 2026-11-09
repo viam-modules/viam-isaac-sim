@@ -227,6 +227,8 @@ parameterizers. `is_moving_velocity_threshold_rad_s` sets the per-joint velocity
 noise floor used by `IsMoving`; it defaults to `0.01` rad/s and must be finite
 and non-negative. Known UR assets default to `wrist_3_link`; `lite6` selects
 NVIDIA's integrated gripper variant and defaults to its gripper body.
+`initial_joint_positions_deg` (known assets, in their joint order) spawns the
+arm at that pose instead of zero joints, and a world `reset` returns it there.
 
 `MoveToJointPositions`, `MoveThroughJointPositions`, and
 `MoveThroughJointPositionsStreamed` work today. Streamed trajectories use their
