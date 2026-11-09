@@ -243,6 +243,23 @@ or file://). With kinematics served, the motion service can plan
 for the simulated arm. Module-level `MoveToPosition` still raises - use the
 motion service.
 
+**Breaking change / migration:** `ur5e` and `ur20` now spawn turned 180° about
+their base Z so the simulated arm matches the served kinematics. Isaac's UR USDs
+are rooted at the URDF's REP-103 `base_link` (arm along +X at zero joints),
+while `ur5e.json` and `ur20.json` use the UR controller's base frame (arm along
+-X), so previously the sim arm was mirrored from Viam's frame system and
+planned motion could collide in the sim. `ur3e.json` already matches its USD
+and is unchanged. A scene laid out around the old orientation can set
+`"base_yaw_offset_deg": 0` to keep it; the attribute also corrects a custom
+`usd_path` whose root frame differs from its `kinematics_url`.
+
+Arms spawn at zero joints unless `initial_joint_positions_deg` (known assets
+only, in the asset's joint order) says otherwise. Use it when zero joints would
+put an arm inside a neighbor or the floor: PhysX cannot separate links that
+start interpenetrated, so the arm stays pinned and moves time out. The pose is
+written into the USD joint state and drive targets, so a world `reset` returns
+the arm there too.
+
 For timestamped controllers, arm `DoCommand` accepts
 `{"command":"set_joint_targets_radians","values":[q0,...,q5]}`. It validates
 six finite radians targets, latches them, and returns immediately without waiting

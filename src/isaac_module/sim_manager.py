@@ -42,7 +42,12 @@ LOGGER = getLogger("viam-isaac-sim")
 # short name in component config. Paths are relative to the assets root;
 # where isaac 5.0 moved an asset, the 5.0 path is listed first with the 4.x
 # path as a fallback - the first candidate that exists is used.
-_UR_KINEMATICS = "https://raw.githubusercontent.com/viam-modules/universal-robots/main/src/kinematics"
+# Pinned so the base_yaw_offset_deg values below, measured against these
+# exact files, cannot silently drift if upstream changes a base convention.
+_UR_KINEMATICS = (
+    "https://raw.githubusercontent.com/viam-modules/universal-robots/"
+    "d31385dd29847f8f5ea16d8bd800636b21b23f4f/src/kinematics"
+)
 UR_JOINT_NAMES = (
     "shoulder_pan_joint",
     "shoulder_lift_joint",
@@ -93,6 +98,12 @@ def _visual_material_properties(name: Any) -> dict[str, Any]:
     return VISUAL_MATERIAL_PRESETS[name]
 
 
+# base_yaw_offset_deg: the Isaac UR USDs are rooted at the URDF's REP-103
+# base_link (arm along +X at zero joints), while ur5e.json and ur20.json use
+# the UR controller's base frame (arm along -X). Without the offset the sim
+# arm is mirrored from the frame system, so planned motion collides in the
+# sim. ur3e.json already includes the URDF's pi base rotation, so it needs
+# none; the other UR assets ship no Viam kinematics to match.
 KNOWN_ASSETS: dict[str, dict[str, Any]] = {
     "ur3e": {
         "usd": ["/Isaac/Robots/UniversalRobots/ur3e/ur3e.usd"],
@@ -105,6 +116,7 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         "kinematics": f"{_UR_KINEMATICS}/ur5e.json",
         "joint_names": UR_JOINT_NAMES,
         "end_effector_link": "wrist_3_link",
+        "base_yaw_offset_deg": 180.0,
     },
     "ur10": {
         "usd": ["/Isaac/Robots/UniversalRobots/ur10/ur10.usd"],
@@ -126,6 +138,7 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         "kinematics": f"{_UR_KINEMATICS}/ur20.json",
         "joint_names": UR_JOINT_NAMES,
         "end_effector_link": "wrist_3_link",
+        "base_yaw_offset_deg": 180.0,
     },
     "lite6": {
         "usd": ["/Isaac/Robots/Ufactory/lite6/lite6.usd"],
@@ -313,6 +326,62 @@ def _reset_articulation_at_pose(
     articulation.set_default_state(**pose)
     world.reset()
     articulation.set_world_pose(**pose)
+
+
+def _arm_base_orientation(
+    frame_orientation: Sequence[float] | None, yaw_offset_deg: float
+) -> list[float] | None:
+    """Orientation (w,x,y,z) for an arm's USD root prim: the Viam frame
+    orientation followed by a yaw about the base Z that aligns the USD's
+    root frame with the base frame of the served kinematics."""
+    if yaw_offset_deg == 0.0:
+        return list(frame_orientation) if frame_orientation is not None else None
+    from .spatial import quat_from_euler_deg, quat_mul
+
+    frame = (
+        tuple(float(v) for v in frame_orientation)
+        if frame_orientation is not None
+        else (1.0, 0.0, 0.0, 0.0)
+    )
+    return list(quat_mul(frame, quat_from_euler_deg(0.0, 0.0, yaw_offset_deg)))
+
+
+def _author_initial_joint_state(
+    asset_prim: Any, joint_names: Sequence[str], positions_deg: Sequence[float]
+) -> None:
+    """Author each arm joint's starting position and drive target (degrees,
+    USD's angular unit) so PhysX starts the arm there instead of at zero
+    joints. Isaac derives an articulation's post-reset default joint state
+    from its drive targets, so later world.reset() calls return here too."""
+    from pxr import PhysxSchema, Usd, UsdPhysics
+
+    if len(positions_deg) != len(joint_names):
+        raise ValueError(
+            f"initial_joint_positions_deg needs {len(joint_names)} values "
+            f"({', '.join(joint_names)}), got {len(positions_deg)}"
+        )
+    joints = {
+        prim.GetName(): prim
+        for prim in Usd.PrimRange(asset_prim)
+        if prim.IsA(UsdPhysics.Joint)
+    }
+    for name, degrees in zip(joint_names, positions_deg):
+        joint = joints.get(name)
+        if joint is None:
+            raise ValueError(
+                f"initial_joint_positions_deg: joint {name!r} not found under "
+                f"{asset_prim.GetPath()}"
+            )
+        if not joint.IsA(UsdPhysics.RevoluteJoint):
+            raise ValueError(
+                f"initial_joint_positions_deg: joint {name!r} is not revolute"
+            )
+        UsdPhysics.DriveAPI.Apply(joint, "angular").CreateTargetPositionAttr(
+            float(degrees)
+        )
+        state = PhysxSchema.JointStateAPI.Apply(joint, "angular")
+        state.CreatePositionAttr(float(degrees))
+        state.CreateVelocityAttr(0.0)
 
 
 def camera_axes(attrs: dict[str, Any]) -> str:
@@ -1961,16 +2030,34 @@ class SimManager:
                         f"{variant_set}={selection!r}"
                     )
 
+        # Spawning at zero joints can put an arm inside its neighbor or the
+        # floor, and PhysX cannot separate links that start interpenetrated.
+        initial_deg = attrs.get("initial_joint_positions_deg")
+        if initial_deg is not None:
+            if not meta.get("joint_names"):
+                raise ValueError(
+                    f"arm {name!r}: initial_joint_positions_deg needs a known "
+                    "asset so the joint order is defined"
+                )
+            _author_initial_joint_state(
+                self._isaac.get_prim_at_path(prim_path),
+                meta["joint_names"],
+                [float(v) for v in initial_deg],
+            )
+
         # Set the base pose directly on the USD prim. The `position=` /
         # `orientation=` kwargs on SingleArticulation don't persist across the
         # world.reset() below when another articulation is already in the
         # scene, so every arm silently ends up at the world origin and their
         # bodies penetrate. Writing to USD persists across resets.
         position = to_vec3(attrs.get("position"))
-        orientation = (
-            [float(v) for v in attrs["orientation_wxyz"]]
-            if attrs.get("orientation_wxyz") is not None
-            else None
+        orientation = _arm_base_orientation(
+            attrs.get("orientation_wxyz"),
+            float(
+                attrs.get(
+                    "base_yaw_offset_deg", meta.get("base_yaw_offset_deg", 0.0)
+                )
+            ),
         )
         pose_kwargs: dict[str, Any] = {"position": list(position)}
         if orientation is not None:
@@ -2008,6 +2095,11 @@ class SimManager:
             max_joint_deg_s2=(
                 float(attrs["max_joint_deg_s2"])
                 if "max_joint_deg_s2" in attrs
+                else None
+            ),
+            initial_target=(
+                [math.radians(float(v)) for v in initial_deg]
+                if initial_deg is not None
                 else None
             ),
         )
@@ -3032,6 +3124,7 @@ class IsaacArmHandle(ArmHandle):
         ),
         max_joint_deg_s: float | None = None,
         max_joint_deg_s2: float | None = None,
+        initial_target: Sequence[float] | None = None,
     ) -> None:
         if (
             not math.isfinite(is_moving_velocity_threshold_rad_s)
@@ -3062,7 +3155,10 @@ class IsaacArmHandle(ArmHandle):
             math.radians(max_joint_deg_s2) if max_joint_deg_s2 is not None else None
         )
         self.refresh_dofs()
-        self._target: list[float] | None = None
+        # the drives already hold an authored initial pose
+        self._target: list[float] | None = (
+            list(initial_target) if initial_target is not None else None
+        )
         self._nudge: list[float] | None = None
         self._trajectory_callback_name = f"arm_trajectory_{id(self)}"
         self._trajectory: list[tuple[float, Any, tuple[float, ...]]] = []
@@ -3443,8 +3539,17 @@ class MockArmHandle(ArmHandle):
             else None
         )
         self._lock = threading.Lock()
-        self._start = [0.0] * dof
-        self._target = [0.0] * dof
+        initial_deg = attrs.get("initial_joint_positions_deg")
+        if initial_deg is not None and len(initial_deg) != dof:
+            raise ValueError(
+                f"initial_joint_positions_deg needs {dof} values, got {len(initial_deg)}"
+            )
+        self._start = (
+            [math.radians(float(v)) for v in initial_deg]
+            if initial_deg is not None
+            else [0.0] * dof
+        )
+        self._target = list(self._start)
         self._t0 = time.monotonic()
         self._trajectory_callback_name = f"arm_trajectory_{id(self)}"
         self._trajectory: tuple[JointTrajectoryPoint, ...] = ()

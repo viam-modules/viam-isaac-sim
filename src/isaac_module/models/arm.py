@@ -31,6 +31,15 @@ Attributes:
                                      by GetKinematics (.json = SVA, .urdf =
                                      URDF; file:// URLs work). Known assets with
                                      official Viam kinematics fetch them automatically.
+  base_yaw_offset_deg (float)      - extra yaw about the base Z applied to the
+                                     spawned USD so it matches the served
+                                     kinematics' base frame (default 180 for
+                                     ur5e and ur20, 0 otherwise; 0 restores the
+                                     raw USD orientation)
+  initial_joint_positions_deg ([float]) - joint positions the arm spawns at
+                                     and returns to on world reset, in the
+                                     asset's joint order (default all zero;
+                                     known assets only)
 """
 
 import asyncio
@@ -134,6 +143,43 @@ def _max_joint_deg_s2(
     return limit
 
 
+def _base_yaw_offset_deg(
+    attrs: Mapping[str, Any], component_name: str
+) -> float | None:
+    raw = attrs.get("base_yaw_offset_deg")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f"{component_name}: base_yaw_offset_deg must be numeric")
+    offset = float(raw)
+    if not math.isfinite(offset):
+        raise ValueError(f"{component_name}: base_yaw_offset_deg must be finite")
+    return offset
+
+
+def _initial_joint_positions_deg(
+    attrs: Mapping[str, Any], component_name: str
+) -> List[float] | None:
+    raw = attrs.get("initial_joint_positions_deg")
+    if raw is None:
+        return None
+    if (
+        not isinstance(raw, (list, tuple))
+        or not raw
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            for value in raw
+        )
+    ):
+        raise ValueError(
+            f"{component_name}: initial_joint_positions_deg must be a non-empty "
+            "list of finite numbers"
+        )
+    return [float(value) for value in raw]
+
+
 def _is_moving_velocity_threshold(
     attrs: Mapping[str, Any], component_name: str
 ) -> float:
@@ -185,6 +231,8 @@ class IsaacArm(Arm, EasyResource):
         _is_moving_velocity_threshold(attrs, config.name)
         _max_joint_deg_s(attrs, config.name)
         _max_joint_deg_s2(attrs, config.name)
+        _base_yaw_offset_deg(attrs, config.name)
+        _initial_joint_positions_deg(attrs, config.name)
         return result
 
     def reconfigure(
@@ -217,6 +265,12 @@ class IsaacArm(Arm, EasyResource):
         max_joint_deg_s2 = _max_joint_deg_s2(attrs, config.name)
         if max_joint_deg_s2 is not None:
             attrs["max_joint_deg_s2"] = max_joint_deg_s2
+        base_yaw_offset_deg = _base_yaw_offset_deg(attrs, config.name)
+        if base_yaw_offset_deg is not None:
+            attrs["base_yaw_offset_deg"] = base_yaw_offset_deg
+        initial_joint_positions_deg = _initial_joint_positions_deg(attrs, config.name)
+        if initial_joint_positions_deg is not None:
+            attrs["initial_joint_positions_deg"] = initial_joint_positions_deg
         self._handle = SimManager.get().create_arm(self.name, attrs)
 
     def _h(self) -> ArmHandle:
