@@ -93,6 +93,8 @@ def _visual_material_properties(name: Any) -> dict[str, Any]:
     return VISUAL_MATERIAL_PRESETS[name]
 
 
+# Isaac's UR USDs reach +X at zero joints; ur5e.json and ur20.json reach -X,
+# so those assets spawn turned to match (ur3e.json already matches its USD).
 KNOWN_ASSETS: dict[str, dict[str, Any]] = {
     "ur3e": {
         "usd": ["/Isaac/Robots/UniversalRobots/ur3e/ur3e.usd"],
@@ -105,6 +107,7 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         "kinematics": f"{_UR_KINEMATICS}/ur5e.json",
         "joint_names": UR_JOINT_NAMES,
         "end_effector_link": "wrist_3_link",
+        "base_yaw_offset_deg": 180.0,
     },
     "ur10": {
         "usd": ["/Isaac/Robots/UniversalRobots/ur10/ur10.usd"],
@@ -126,6 +129,7 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         "kinematics": f"{_UR_KINEMATICS}/ur20.json",
         "joint_names": UR_JOINT_NAMES,
         "end_effector_link": "wrist_3_link",
+        "base_yaw_offset_deg": 180.0,
     },
     "lite6": {
         "usd": ["/Isaac/Robots/Ufactory/lite6/lite6.usd"],
@@ -350,6 +354,24 @@ def _author_initial_joint_state(
         state = PhysxSchema.JointStateAPI.Apply(joint, "angular")
         state.CreatePositionAttr(float(degrees))
         state.CreateVelocityAttr(0.0)
+
+
+def _arm_base_orientation(
+    frame_orientation: Sequence[float] | None, yaw_offset_deg: float
+) -> list[float] | None:
+    """Orientation (w,x,y,z) for an arm's USD root prim: the Viam frame
+    orientation followed by a yaw about the base Z that aligns the USD's
+    root frame with the base frame of the served kinematics."""
+    if yaw_offset_deg == 0.0:
+        return list(frame_orientation) if frame_orientation is not None else None
+    from .spatial import quat_from_euler_deg, quat_mul
+
+    frame = (
+        tuple(float(v) for v in frame_orientation)
+        if frame_orientation is not None
+        else (1.0, 0.0, 0.0, 0.0)
+    )
+    return list(quat_mul(frame, quat_from_euler_deg(0.0, 0.0, yaw_offset_deg)))
 
 
 def camera_axes(attrs: dict[str, Any]) -> str:
@@ -2017,10 +2039,9 @@ class SimManager:
         # scene, so every arm silently ends up at the world origin and their
         # bodies penetrate. Writing to USD persists across resets.
         position = to_vec3(attrs.get("position"))
-        orientation = (
-            [float(v) for v in attrs["orientation_wxyz"]]
-            if attrs.get("orientation_wxyz") is not None
-            else None
+        orientation = _arm_base_orientation(
+            attrs.get("orientation_wxyz"),
+            float(meta.get("base_yaw_offset_deg", 0.0)),
         )
         pose_kwargs: dict[str, Any] = {"position": list(position)}
         if orientation is not None:
