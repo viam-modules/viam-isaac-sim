@@ -2086,6 +2086,9 @@ class SimManager:
                 if initial_deg is not None
                 else None
             ),
+            # the Viam frame, not the USD root pose with its base_yaw_offset_deg
+            base_position=position,
+            base_orientation=attrs.get("orientation_wxyz"),
         )
 
     def create_gripper(self, name: str, attrs: dict[str, Any]) -> "GripperHandle":
@@ -3004,6 +3007,8 @@ class JointTrajectoryPoint:
 
 class ArmHandle:
     _sim: "SimManager"
+    _base_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    _base_orientation: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
 
     def get_joint_positions(self) -> list[float]:  # radians
         raise NotImplementedError
@@ -3089,6 +3094,18 @@ class ArmHandle:
         """((x,y,z) meters, (w,x,y,z) quaternion) of the end effector."""
         raise NotImplementedError
 
+    def get_end_pose_in_base(
+        self,
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+        """The end effector pose in the arm's base frame, as GetEndPosition
+        reports it."""
+        from .spatial import pose_in_frame
+
+        position, rotation = self.get_end_pose()
+        return pose_in_frame(
+            self._base_position, self._base_orientation, position, rotation
+        )
+
     def capture_state(self):
         """Return positions, velocities, target, and EE pose on the sim thread."""
         raise NotImplementedError
@@ -3109,6 +3126,8 @@ class IsaacArmHandle(ArmHandle):
         max_joint_deg_s: float | None = None,
         max_joint_deg_s2: float | None = None,
         initial_target: Sequence[float] | None = None,
+        base_position: Sequence[float] = (0.0, 0.0, 0.0),
+        base_orientation: Sequence[float] | None = None,
     ) -> None:
         if (
             not math.isfinite(is_moving_velocity_threshold_rad_s)
@@ -3129,6 +3148,9 @@ class IsaacArmHandle(ArmHandle):
         self._art = articulation
         self._ee = ee_prim
         self._prim_path = prim_path
+        self._base_position = tuple(float(v) for v in base_position)
+        if base_orientation is not None:
+            self._base_orientation = _quaternion(base_orientation, "orientation_wxyz")
         self._joint_names = tuple(joint_names or tuple(articulation.dof_names))
         self._joint_indices: list[int] = []
         self._is_moving_velocity_threshold_rad_s = is_moving_velocity_threshold_rad_s
