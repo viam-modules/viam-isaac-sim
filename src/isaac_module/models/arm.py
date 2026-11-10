@@ -266,7 +266,7 @@ class IsaacArm(Arm, EasyResource):
         }
 
     async def get_end_position(self, **kwargs) -> Pose:
-        (x, y, z), quat = await asyncio.to_thread(self._h().get_end_pose)
+        (x, y, z), quat = await asyncio.to_thread(self._h().get_end_pose_in_base)
         ox, oy, oz, theta = quat_to_ov(quat)
         return Pose(
             x=x * 1000.0,

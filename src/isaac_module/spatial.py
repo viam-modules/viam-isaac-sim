@@ -39,6 +39,19 @@ def quat_rotate(q: Quat, v: Vec3) -> Vec3:
     return (r[1], r[2], r[3])
 
 
+def pose_in_frame(
+    frame_position: Vec3, frame_rotation: Quat, position: Vec3, rotation: Quat
+) -> Tuple[Vec3, Quat]:
+    """Express a world pose in the frame whose world pose is given."""
+    inverse = quat_conj(frame_rotation)
+    offset = (
+        position[0] - frame_position[0],
+        position[1] - frame_position[1],
+        position[2] - frame_position[2],
+    )
+    return quat_rotate(inverse, offset), quat_mul(inverse, rotation)
+
+
 def quat_from_axis_angle(axis: Vec3, angle: float) -> Quat:
     x, y, z = axis
     n = math.sqrt(x * x + y * y + z * z)
