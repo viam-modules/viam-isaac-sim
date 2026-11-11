@@ -3,8 +3,10 @@ background thread (standing in for the process main thread) and exercises
 the viam component models against it."""
 
 import asyncio
+import dataclasses
 import math
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +21,7 @@ from isaac_module.models.world import IsaacWorld
 from isaac_module.sim_manager import (
     SimConfig,
     SimManager,
+    _STATUS_SETTINGS,
     _visual_material_properties,
     RealTimePacer,
     parse_markers,
@@ -70,6 +73,28 @@ def test_world_boots_and_status(world):
     status = asyncio.run(world.do_command({"command": "status"}))
     assert status["booted"] is True
     assert status["mock"] is True
+    deadline = time.monotonic() + 2.0
+    while status["perf"]["render_hz"] <= 0 and time.monotonic() < deadline:
+        time.sleep(0.02)
+        status = asyncio.run(world.do_command({"command": "status"}))
+    assert status["perf"]["render_hz"] > 0
+    assert set(status["perf"]) == {
+        "real_time_factor",
+        "step_ms",
+        "loop_ms",
+        "render_hz",
+    }
+    assert set(status["perf_totals"]) == {
+        "loops",
+        "loop_s",
+        "step_s",
+        "sim_s",
+        "playing_loop_s",
+        "playing_loops",
+        "playing_step_s",
+    }
+    assert status["settings"]["real_time"] is False
+    assert status["settings"]["livestream"] is True
 
 
 def test_mock_sim_clock_advances(sim):
@@ -497,3 +522,8 @@ def test_capture_after_render_samples_once_per_capture_period():
         manager._capture_after_render()
     manager._capture_after_render()
     assert len(sampled) == 5
+
+
+def test_status_settings_are_simconfig_fields():
+    names = {f.name for f in dataclasses.fields(SimConfig)}
+    assert set(_STATUS_SETTINGS) <= names

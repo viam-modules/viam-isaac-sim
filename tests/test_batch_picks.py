@@ -1022,3 +1022,65 @@ def test_batch_picks_help_runs_as_direct_script():
     assert "--grip-only" in result.stdout
     assert "--grip-lift-m" in result.stdout
     assert "--upload-dataset-id" in result.stdout
+
+
+def test_perf_report_uses_whole_run_sim_and_wall_time():
+    before = {"sim_time": 10.0, "perf": {"real_time_factor": 9.0}}
+    after = {
+        "sim_time": 40.0,
+        "perf": {"real_time_factor": 1.5, "step_ms": 20.0},
+        "settings": {"real_time": False, "livestream": False},
+    }
+    report = batch_picks.perf_report(before, after, wall_s=20.0)
+    assert report == {
+        "wall_s": 20.0,
+        "sim_s": 30.0,
+        "real_time_factor": 1.5,
+        "window": {"real_time_factor": 1.5, "step_ms": 20.0},
+        "settings": {"real_time": False, "livestream": False},
+        "run": {
+            "loops": 0,
+            "paused_loops": 0,
+            "step_ms": 0.0,
+            "render_hz": 0.0,
+            "real_time_factor_playing": 0.0,
+        },
+    }
+
+
+def test_perf_report_zero_wall_time():
+    assert batch_picks.perf_report({}, {}, wall_s=0.0)["real_time_factor"] == 0.0
+
+
+def test_perf_report_run_uses_totals_deltas():
+    def totals(loops, sim_s, playing_loops, playing_loop_s, playing_step_s):
+        return {
+            "perf_totals": {
+                "loops": loops,
+                "sim_s": sim_s,
+                "playing_loops": playing_loops,
+                "playing_loop_s": playing_loop_s,
+                "playing_step_s": playing_step_s,
+            }
+        }
+
+    before = totals(100, 5.0, 40, 5.0, 0.4)
+    after = totals(300, 11.0, 140, 10.0, 1.4)
+    run = batch_picks.perf_report(before, after, wall_s=10.0)["run"]
+    assert run == pytest.approx(
+        {
+            "loops": 100,
+            "paused_loops": 100,
+            "step_ms": 10.0,
+            "render_hz": 20.0,
+            "real_time_factor_playing": 1.2,
+        }
+    )
+
+
+def test_perf_report_run_zero_denominators():
+    t = {"loops": 5, "playing_loops": 5, "playing_step_s": 1.0, "sim_s": 1.0}
+    run = batch_picks.perf_report({}, {"perf_totals": t}, wall_s=1.0)["run"]
+    assert run["render_hz"] == 0.0
+    assert run["real_time_factor_playing"] == 0.0
+    assert run["step_ms"] == 200.0
