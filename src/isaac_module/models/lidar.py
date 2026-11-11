@@ -112,6 +112,10 @@ class IsaacLidar(Camera, EasyResource):
             )
         return to_pcd(filter_range(scan[1], self._min_range_m, self._max_range_m))
 
+    async def close(self) -> None:
+        self._handle = None
+        await asyncio.to_thread(SimManager.get().remove_lidar, self.name)
+
     async def get_point_cloud(self, **kwargs) -> Tuple[bytes, str]:
         return await asyncio.to_thread(self._point_cloud), CameraMimeType.PCD
 

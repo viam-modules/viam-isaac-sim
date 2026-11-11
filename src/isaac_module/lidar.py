@@ -57,6 +57,9 @@ class LidarHandle:
     def reconfigure(self, attrs: dict[str, Any]) -> None:
         raise NotImplementedError
 
+    def close(self) -> None:
+        pass
+
 
 def _mock_points(planar: bool) -> np.ndarray:
     az = np.radians(np.arange(360, dtype=np.float32))
@@ -162,7 +165,8 @@ class IsaacLidarHandle(LidarHandle):
             break
         if self._annotator is None:
             raise RuntimeError(f"{name}: no RTX lidar scan-buffer annotator in this Isaac Sim")
-        self._xform = sim._isaac.SingleXFormPrim(str(sensor.GetPath()))
+        self._prim_path = str(sensor.GetPath())
+        self._xform = sim._isaac.SingleXFormPrim(self._prim_path)
         self._rate = effective_rate(attrs)
         self._native_hz = preset.native_hz
         self._scan: Optional[Scan] = None
@@ -202,3 +206,11 @@ class IsaacLidarHandle(LidarHandle):
 
     def latest_scan(self) -> Optional[Scan]:
         return self._scan  # tuple swap is atomic; no sim-thread hop
+
+    def close(self) -> None:
+        """Stop rendering this lidar and remove its prim (sim thread)."""
+        import omni.usd
+
+        self._annotator.detach()
+        self._render_product.destroy()
+        omni.usd.get_context().get_stage().RemovePrim(self._prim_path)

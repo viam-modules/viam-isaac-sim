@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -90,6 +91,25 @@ def test_create_lidar_restart_only_fields(manager):
     manager.create_lidar("lid", attrs)
     with pytest.raises(ValueError, match="module restart.*sensor"):
         manager.create_lidar("lid", {**attrs, "sensor": "ouster_os1_32"})
+
+
+def test_closed_lidar_can_come_back_with_a_new_sensor(manager):
+    lid = IsaacLidar.new(_config("lid", {"world": "sim-world", "sensor": "rplidar_s2e"}), {})
+    old = lid._handle
+    asyncio.run(lid.close())
+    assert "lid" not in manager._handles
+    new = manager.create_lidar("lid", {"world": "sim-world", "sensor": "ouster_os1_32"})
+    assert new is not old
+
+
+def test_remove_lidar_tears_down_on_the_sim_thread(manager):
+    closed = []
+    handle = SimpleNamespace(close=lambda: closed.append(True))
+    manager.mock = False
+    manager._handles["lid"] = ({}, handle)
+    manager._render_callbacks["lidar:lid"] = lambda: None
+    manager.remove_lidar("lid")
+    assert closed == [True] and "lidar:lid" not in manager._render_callbacks
 
 
 def test_create_lidar_rejects_rate_above_native_on_reconfigure(manager):

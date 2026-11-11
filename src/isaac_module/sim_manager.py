@@ -2692,6 +2692,19 @@ class SimManager:
         )
         return handle
 
+    def remove_lidar(self, name: str) -> None:
+        """Tear down a closed lidar so a rename or re-add with new settings
+        builds a fresh sensor instead of being refused."""
+        entry = self._handles.pop(name, None)
+        if entry is None or self.mock:
+            return
+
+        def _close() -> None:
+            self._render_callbacks.pop(f"lidar:{name}", None)
+            entry[1].close()
+
+        self.run(_close, timeout=60.0)
+
     def _require_prim(self, prim_path: str) -> None:
         """Raise a helpful error if prim_path doesn't exist in the stage."""
         get_prim = getattr(self._isaac, "get_prim_at_path", None)
