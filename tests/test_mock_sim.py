@@ -584,3 +584,15 @@ def test_capture_after_render_samples_once_per_capture_period():
 def test_status_settings_are_simconfig_fields():
     names = {f.name for f in dataclasses.fields(SimConfig)}
     assert set(_STATUS_SETTINGS) <= names
+
+
+def test_closing_an_arm_stops_it(world):
+    arm = IsaacArm.new(_config("closing-arm", {"world": "sim-world"}), {})
+    handle = arm._h()
+    stopped = []
+    handle.stop = lambda: stopped.append(True)
+
+    asyncio.run(arm.close())
+
+    assert stopped == [True]
+    assert "closing-arm" not in SimManager.get()._handles

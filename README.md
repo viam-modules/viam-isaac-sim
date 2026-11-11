@@ -253,10 +253,10 @@ articulation DOFs this arm drives, in order. It overrides a known asset's
 joints; without it a custom `usd_path`/`prim_path` arm drives every DOF. Names
 missing from the articulation fail at startup with an error naming the arm.
 Several arms can split one articulation, such as a humanoid's torso, head, and
-two arms: one arm loads the USD, and the others attach to the same `prim_path`
-with no `usd_path`/`asset`. The attaching arms reuse the first arm's
+two arms: one arm (or a base) loads the USD, and the others attach to the same
+`prim_path` with no `usd_path`/`asset`. The attaching arms reuse the loader's
 articulation, so they don't move its base or reset the scene, and their
-`position` is ignored. Each attaching arm needs the loading arm in its
+`position` is ignored. Each attaching arm needs the loader in its
 `depends_on`, so the USD is in the stage before it attaches:
 
 ```json
@@ -273,8 +273,9 @@ articulation, so they don't move its base or reset the scene, and their
 Multi-arm articulations are verified only in mock mode and against stand-ins
 for the Isaac API, not in a running Isaac Sim. Unverified: that partial
 `ArticulationAction`s from sibling arms on one articulation leave each other's
-joint targets alone, and how a gripper attached to one of the arms (which calls
-`world.reset()`) affects the others.
+joint targets alone. After every `world.reset()` (the world `reset` command, a
+gripper attaching) each arm looks up its joint indices again, and a shared
+base's arm joints get their USD drive gains back.
 
 `MoveToJointPositions`, `MoveThroughJointPositions`, and
 `MoveThroughJointPositionsStreamed` work today. Streamed trajectories use their

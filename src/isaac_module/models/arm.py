@@ -284,10 +284,15 @@ class IsaacArm(Arm, EasyResource):
         self._handle = SimManager.get().create_arm(self.name, attrs)
 
     async def close(self) -> None:
-        """viam-server removed or renamed this arm: drop its cached handle and
-        its claim on a shared articulation's USD."""
-        self._handle = None
-        SimManager.get().remove_arm(self.name)
+        """viam-server removed or renamed this arm: stop it, drop its cached
+        handle and its claim on a shared articulation's USD."""
+        handle, self._handle = self._handle, None
+        try:
+            if handle is not None:
+                # else its trajectory callback keeps writing the shared joints
+                await asyncio.to_thread(handle.stop)
+        finally:
+            SimManager.get().remove_arm(self.name)
 
     def _h(self) -> ArmHandle:
         if self._handle is None:
@@ -297,13 +302,11 @@ class IsaacArm(Arm, EasyResource):
     def policy_metadata(self) -> Mapping[str, Any]:
         """Return the simulator embodiment identity used by policy validation."""
         model = str(self._attrs.get("asset", self._attrs.get("arm_model", "")))
-        meta = KNOWN_ASSETS.get(model, {})
         return {
             "simulation": True,
             "arm_model": model,
-            "joint_names": list(
-                self._attrs.get("joint_names") or meta.get("joint_names", ())
-            ),
+            # what the handle drives: a joint_names change needs a restart
+            "joint_names": list(self._h().joint_names()),
         }
 
     async def get_end_position(self, **kwargs) -> Pose:

@@ -197,11 +197,40 @@ def test_base_sharing_articulation_keeps_arm_position_gains(monkeypatch):
     manager._isaac.SingleArticulation = lambda prim_path, name: art
 
     manager._create_base_isaac("base", {"prim_path": "/World/vega", "wheel_joints": list(WHEELS)})
-    manager._create_arm_isaac(
+    torso = manager._create_arm_isaac(
         "torso", {"prim_path": "/World/vega", "joint_names": ["torso_j1", "torso_j2", "torso_j3"]}
     )
 
-    assert calls.count("reset") == 2  # base init and first arm attach both re-zero gains
+    # the arm attaches to the base's articulation: no re-pose to its own
+    # position, no second reset
+    assert torso._art is robot
+    assert calls.count("reset") == 1
+    assert not [c for c in calls if c[0] == "pose"]
     kps = controller.kps.reshape(-1)
     assert kps[:2].tolist() == [0.0, 0.0]  # wheels stay velocity-controlled
     assert kps[2:].tolist() == [1e4] * len(HUMANOID_DOFS)
+
+    # a world reset (the world `reset` DoCommand) re-zeroes them again; restore
+    manager._handles["torso"] = ({}, torso)
+    manager.run = lambda fn, **kw: fn()
+    manager._booted = SimpleNamespace(is_set=lambda: True)
+    manager._boot_error = None
+    manager.mock = False
+    manager.reset()
+    assert controller.kps.reshape(-1)[2:].tolist() == [1e4] * len(HUMANOID_DOFS)
+
+
+def test_world_reset_refreshes_sibling_arm_dof_indices():
+    manager, _ = _manager()
+    torso = manager._create_arm_isaac(
+        "torso",
+        {"usd_path": "/r.usd", "prim_path": "/World/vega", "joint_names": ["torso_j1"]},
+    )
+    left = manager._create_arm_isaac(
+        "left", {"prim_path": "/World/vega", "joint_names": ["L_arm_j1"]}
+    )
+    manager._handles = {"torso": ({}, torso), "left": ({}, left)}
+    # a gripper on the torso adds DOFs ahead of the left arm's joints
+    torso._art.dof_names = ["torso_j1", "finger_joint", "x"] + HUMANOID_DOFS[1:]
+    manager._reset_world()
+    assert left._joint_indices == [torso._art.dof_names.index("L_arm_j1")]

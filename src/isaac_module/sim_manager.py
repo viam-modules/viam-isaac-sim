@@ -2271,12 +2271,19 @@ class SimManager:
 
     def _reset_world(self) -> None:
         """world.reset() returns joints to their defaults; clear arm ramp state
-        first so no ramp step drives toward a pose that no longer exists."""
+        first so no ramp step drives toward a pose that no longer exists. Then
+        restore what it clobbers on shared articulations: a base's re-zeroed
+        arm gains, and every arm's DOF indices (a gripper can add DOFs ahead of
+        a sibling arm's joints)."""
         for _, handle in list(self._handles.values()):
             if isinstance(handle, IsaacArmHandle):
                 handle._target = None
                 handle._commanded = None
         self.world.reset()
+        self._restore_shared_base_gains()
+        for _, handle in list(self._handles.values()):
+            if isinstance(handle, IsaacArmHandle):
+                handle.refresh_dofs()
 
     def reset(self) -> None:
         self._require_booted()
@@ -2844,7 +2851,6 @@ class SimManager:
         self._reset_world()
         if contact_view is not None:
             contact_view.initialize()
-        arm.refresh_dofs()
         articulation = arm._art
         drive_joint = str(meta["drive_joint"])
         names = list(articulation.dof_names)
@@ -2972,7 +2978,6 @@ class SimManager:
         articulation_view._physics_view = None
         articulation_view._default_joints_state = None
         self._reset_world()
-        arm.refresh_dofs()
         articulation = arm._art
 
         drive_joint = str(meta.get("drive_joint", "finger_joint"))
@@ -3339,6 +3344,9 @@ class SimManager:
             base_kwargs["orientation"] = [float(v) for v in attrs["orientation_wxyz"]]
         robot = self._isaac.WheeledRobot(**base_kwargs)
         self.world.scene.add(robot)
+        # an arm attaching later reuses this wrapper instead of re-spawning
+        # (which would move the base to the arm's position)
+        self._arm_articulations.setdefault(prim_path, robot)
         self._reset_world()
         non_wheel = tuple(n for n in robot.dof_names if n not in wheel_joints)
         if non_wheel:
