@@ -1,4 +1,4 @@
-"""viam-labs:isaac-sim:base - a simulated differential-drive base.
+"""viam-labs:isaac-sim:base - a simulated differential-drive or holonomic base.
 
 Attributes:
   world (string, required)     - name of the viam-labs:isaac-sim:world component
@@ -21,6 +21,10 @@ Attributes:
                                  (0.03), thickness_m (0.002)}]
   chassis_link (string)        - link the markers ride on, under prim_path
                                  (the asset's, e.g. "chassis" for jetbot)
+  planar_joints ([x, y, yaw])  - holonomic mode: drive these joints of the
+                                 articulation an arm on prim_path loads (e.g.
+                                 RidgebackFranka's dummy_base_* joints) instead of
+                                 wheels; linear.x strafes. Add that arm to depends_on.
 """
 
 import asyncio
@@ -87,12 +91,7 @@ class IsaacBase(Base, EasyResource):
         speed = abs(velocity) / 1000.0
         direction = 1.0 if (meters >= 0) == (velocity >= 0) else -1.0
         duration = abs(meters) / speed
-        handle = self._h()
-        await asyncio.to_thread(handle.set_velocity, direction * speed, 0.0)
-        try:
-            await asyncio.sleep(duration)
-        finally:
-            await asyncio.to_thread(handle.stop)
+        await self._drive(direction * speed, 0.0, duration)
 
     async def spin(self, angle: float, velocity: float, **kwargs) -> None:
         if velocity == 0:
@@ -101,22 +100,34 @@ class IsaacBase(Base, EasyResource):
         speed = math.radians(abs(velocity))
         direction = 1.0 if (radians >= 0) == (velocity >= 0) else -1.0
         duration = abs(radians) / speed
+        await self._drive(0.0, direction * speed, duration)
+
+    async def _drive(self, linear: float, angular: float, duration: float) -> None:
         handle = self._h()
-        await asyncio.to_thread(handle.set_velocity, 0.0, direction * speed)
         try:
-            await asyncio.sleep(duration)
+            if hasattr(handle, "drive_for"):  # bounded in sim time: exact distance
+                await asyncio.to_thread(handle.drive_for, linear, angular, duration)
+                while await asyncio.to_thread(handle.is_moving):
+                    await asyncio.sleep(0.02)
+            else:  # ponytail: wall-clock timing drifts when the sim runs off real time
+                await asyncio.to_thread(handle.set_velocity, linear, angular)
+                await asyncio.sleep(duration)
         finally:
             await asyncio.to_thread(handle.stop)
 
     async def set_power(self, linear: Vector3, angular: Vector3, **kwargs) -> None:
         lin = max(-1.0, min(1.0, linear.y)) * self._max_linear
         ang = max(-1.0, min(1.0, angular.z)) * self._max_angular
-        await asyncio.to_thread(self._h().set_velocity, lin, ang)
+        left = -max(-1.0, min(1.0, linear.x)) * self._max_linear  # viam +x is right
+        await asyncio.to_thread(self._h().set_velocity, lin, ang, left)
 
     async def set_velocity(self, linear: Vector3, angular: Vector3, **kwargs) -> None:
         # viam: linear mm/s, angular deg/s -> isaac: m/s, rad/s
         await asyncio.to_thread(
-            self._h().set_velocity, linear.y / 1000.0, math.radians(angular.z)
+            self._h().set_velocity,
+            linear.y / 1000.0,
+            math.radians(angular.z),
+            -linear.x / 1000.0,  # viam +x is right
         )
 
     async def stop(self, **kwargs) -> None:

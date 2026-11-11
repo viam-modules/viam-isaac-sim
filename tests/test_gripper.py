@@ -843,3 +843,111 @@ def test_kinematics_and_geometry_describe_tcp_box(manager):
         assert geometries[0].center.z == pytest.approx(-57.5)
 
     asyncio.run(scenario())
+
+
+FRANKA_HAND = {
+    "joint_names": ["panda_finger_joint1", "panda_finger_joint2"],
+    "open_position": 0.04,
+    "closed_position": 0.0,
+}
+
+
+def test_validate_joint_gripper_needs_positions_and_no_asset():
+    base = {"world": "w", "arm": "a"}
+    IsaacGripper.validate_config(_config("g", {**base, **FRANKA_HAND}))
+    with pytest.raises(ValueError, match="open_position is required"):
+        IsaacGripper.validate_config(
+            _config("g", {**base, "joint_names": ["panda_finger_joint1"], "closed_position": 0})
+        )
+    with pytest.raises(ValueError, match="asset or joint_names"):
+        IsaacGripper.validate_config(
+            _config("g", {**base, **FRANKA_HAND, "asset": "robotiq_2f_85"})
+        )
+
+
+def test_joint_gripper_grabs_without_a_preset(manager):
+    _arm()
+    gripper = _gripper({**FRANKA_HAND, "closed_deg": None, "mock_object_width_m": 0.05})
+
+    async def scenario():
+        await gripper.open()
+        assert await gripper.grab() is True
+        assert (await gripper.is_holding_something()).is_holding_something is True
+
+    asyncio.run(scenario())
+
+
+def test_independent_fingers_are_all_driven():
+    class Controller:
+        def __init__(self):
+            self.kps, self.kds = np.full(9, 1e7), np.full(9, 1e5)
+
+        def get_gains(self):
+            return self.kps, self.kds
+
+        def set_gains(self, kps, kds):
+            self.kps, self.kds = np.asarray(kps), np.asarray(kds)
+
+    controller = Controller()
+    art = SimpleNamespace(
+        dof_names=[f"panda_joint{i}" for i in range(1, 8)]
+        + ["panda_finger_joint1", "panda_finger_joint2"],
+        get_articulation_controller=lambda: controller,
+    )
+    handle = IsaacGripperHandle(
+        SimpleNamespace(),
+        art,
+        "panda_finger_joint1",
+        0.04,
+        0.0,
+        0.001,
+        position_unit="m",
+        coupled_drive_joints=("panda_finger_joint2",),
+        drive_coupled=True,
+        drive_stiffness=2000.0,
+        drive_damping=100.0,
+    )
+    assert handle._drive_indices == [7, 8]
+    assert controller.kps[7:].tolist() == [2000.0, 2000.0]  # tamed, not the USD's 1e7
+    assert controller.kps[:7].tolist() == [1e7] * 7  # arm joints untouched
+
+
+def test_stop_keeps_a_settled_grip():
+    # viam-server stops the gripper when the session that sent Grab ends
+    state = {"q": 0.04, "t": 0.0}
+
+    class Controller:
+        def get_gains(self):
+            return np.ones(2), np.ones(2)
+
+        def set_gains(self, kps, kds):
+            pass
+
+    class World:
+        current_time = property(lambda self: state["t"])
+
+    art = SimpleNamespace(
+        dof_names=["f1", "f2"],
+        get_articulation_controller=Controller,
+        get_joint_positions=lambda joint_indices: np.full(len(joint_indices), state["q"]),
+        apply_action=lambda action: None,
+    )
+    sim = SimpleNamespace(
+        run=lambda fn: fn(),
+        mock=False,
+        world=World(),
+        _isaac=SimpleNamespace(ArticulationAction=lambda **kw: kw),
+    )
+    handle = IsaacGripperHandle(
+        sim, art, "f1", 0.04, 0.0, 0.001, position_unit="m",
+        coupled_drive_joints=("f2",), drive_coupled=True,
+    )
+    handle.close()
+    for q in (0.03, 0.025, 0.025, 0.025, 0.025):  # closes onto a 50 mm cube, stalls
+        state["q"], state["t"] = q, state["t"] + 0.1
+        handle.is_moving()
+    assert handle.is_holding()
+
+    handle.stop()
+    assert handle.is_holding()
+    assert handle._target == 0.0  # still squeezing toward closed

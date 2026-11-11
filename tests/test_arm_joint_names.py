@@ -234,3 +234,23 @@ def test_world_reset_refreshes_sibling_arm_dof_indices():
     torso._art.dof_names = ["torso_j1", "finger_joint", "x"] + HUMANOID_DOFS[1:]
     manager._reset_world()
     assert left._joint_indices == [torso._art.dof_names.index("L_arm_j1")]
+
+
+def test_pin_link_to_world_fixes_root_at_spawn_pose():
+    pytest.importorskip("pxr")
+    from pxr import Sdf, Usd, UsdGeom, UsdPhysics
+    pxr = SimpleNamespace(Sdf=Sdf, Usd=Usd, UsdGeom=UsdGeom, UsdPhysics=UsdPhysics)
+    stage = pxr.Usd.Stage.CreateInMemory()
+    pxr.UsdGeom.Xform.Define(stage, "/World/robot/world")
+
+    sim_manager._pin_link_to_world(
+        stage, "/World/robot/world", (1.0, 2.0, 0.0), (0.0, 0.0, 0.0, 1.0)
+    )
+
+    joint = pxr.UsdPhysics.FixedJoint(stage.GetPrimAtPath("/World/robot/world_viam_fixed_base"))
+    assert joint.GetBody0Rel().GetTargets() == []  # world
+    assert joint.GetBody1Rel().GetTargets() == [pxr.Sdf.Path("/World/robot/world")]
+    assert tuple(joint.GetLocalPos0Attr().Get()) == (1.0, 2.0, 0.0)
+    assert joint.GetLocalRot0Attr().Get().GetReal() == 0.0
+    with pytest.raises(ValueError, match="no prim"):
+        sim_manager._pin_link_to_world(stage, "/World/robot/nope", (0, 0, 0), None)

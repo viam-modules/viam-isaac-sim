@@ -28,11 +28,11 @@ from viam.utils import ValueTypes
 
 from .. import FAMILY, NAMESPACE
 from ..sim_manager import (
-    KNOWN_ASSETS,
     LITE6_JAW_LAYOUTS,
     GripperHandle,
     SimManager,
     _prim_name,
+    gripper_meta,
 )
 from .utils import get_attrs
 
@@ -122,17 +122,11 @@ class IsaacGripper(Gripper, EasyResource):
             raise ValueError(
                 f"{config.name}: frame.parent must be the attached arm {arm!r}"
             )
-        asset = str(attrs.get("asset", DEFAULT_ASSET))
-        meta = KNOWN_ASSETS.get(asset)
-        if meta is None or meta.get("kind") != "gripper":
-            supported = sorted(
-                name
-                for name, value in KNOWN_ASSETS.items()
-                if value.get("kind") == "gripper"
-            )
-            raise ValueError(
-                f"{config.name}: unsupported gripper asset {asset!r}; use one of {supported}"
-            )
+        try:
+            gripper_meta(attrs)
+        except ValueError as exc:
+            raise ValueError(f"{config.name}: {exc}") from None
+        asset = str(attrs.get("asset", "" if "joint_names" in attrs else DEFAULT_ASSET))
         jaw_layout = attrs.get("jaw_layout")
         if jaw_layout is not None:
             if asset != "lite6_gripper":
@@ -159,12 +153,13 @@ class IsaacGripper(Gripper, EasyResource):
         dependencies: Mapping[ResourceName, ResourceBase],
     ) -> None:
         attrs = get_attrs(config)
-        attrs.setdefault("asset", DEFAULT_ASSET)
-        meta = KNOWN_ASSETS[str(attrs["asset"])]
+        if "joint_names" not in attrs:
+            attrs.setdefault("asset", DEFAULT_ASSET)
+        meta = gripper_meta(attrs)
         sensorless = attrs.get("sensorless", False)
         if not isinstance(sensorless, bool):
             raise ValueError(f"{config.name}: sensorless must be a boolean")
-        if attrs["asset"] == "lite6_gripper":
+        if attrs.get("asset") == "lite6_gripper":
             if not sensorless:
                 self.logger.warning(
                     "%s: lite6_gripper is normally sensorless; set sensorless=true "
@@ -172,7 +167,7 @@ class IsaacGripper(Gripper, EasyResource):
                     config.name,
                 )
             attrs.setdefault("jaw_layout", "wide")
-        if not meta.get("integrated_arm_asset"):
+        if not (meta.get("integrated_arm_asset") or meta.get("joints_on_arm")):
             attrs.setdefault("parent_prim", _default_parent_prim(str(attrs["arm"])))
         self._timeout = float(attrs.get("grab_timeout_sec", DEFAULT_TIMEOUT_S))
         self._sensorless = sensorless
@@ -182,7 +177,7 @@ class IsaacGripper(Gripper, EasyResource):
         self._jaw_box_center_z_mm = self._jaw_box_mm[2] / 2.0 - tcp_offset_m * 1000.0
         self._kinematics = None
         self._handle = SimManager.get().create_gripper(self.name, attrs)
-        self._asset = str(attrs["asset"])
+        self._asset = str(attrs.get("asset") or attrs.get("gripper_model", "joint_gripper"))
 
     def policy_metadata(self) -> Mapping[str, Any]:
         """Return the simulator embodiment identity used by policy validation."""

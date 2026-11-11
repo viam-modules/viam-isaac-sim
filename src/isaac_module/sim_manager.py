@@ -191,6 +191,64 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
 }
 
 
+def _finite(attrs: dict[str, Any], key: str, default: float | None = None) -> float:
+    value = attrs.get(key, default)
+    if value is None:
+        raise ValueError(f"gripper: {key} is required with joint_names")
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError(f"gripper: {key} must be finite")
+    return value
+
+
+def gripper_meta(attrs: dict[str, Any]) -> dict[str, Any]:
+    """Gripper metadata: a KNOWN_ASSETS preset (``asset``), or one described by
+    the finger joints already in the arm's articulation (``joint_names``), so a
+    custom-USD hand needs config rather than a new preset."""
+    joints = attrs.get("joint_names")
+    if joints is None:
+        asset = str(attrs.get("asset", "robotiq_2f_85"))
+        meta = KNOWN_ASSETS.get(asset)
+        if meta is None or meta.get("kind") != "gripper":
+            known = sorted(n for n, v in KNOWN_ASSETS.items() if v.get("kind") == "gripper")
+            raise ValueError(f"unknown gripper asset {asset!r}; known: {known}")
+        return meta
+    if attrs.get("asset"):
+        raise ValueError("gripper: set asset or joint_names, not both")
+    if (
+        not isinstance(joints, (list, tuple))
+        or not joints
+        or not all(isinstance(j, str) and j for j in joints)
+        or len(set(joints)) != len(joints)
+    ):
+        raise ValueError("gripper: joint_names must be a non-empty list of unique names")
+    unit = str(attrs.get("position_unit", "m"))
+    if unit not in ("m", "rad"):
+        raise ValueError("gripper: position_unit must be 'm' or 'rad'")
+    open_position = _finite(attrs, "open_position")
+    closed_position = _finite(attrs, "closed_position")
+    if math.isclose(open_position, closed_position):
+        raise ValueError("gripper: open_position and closed_position must differ")
+    return {
+        "kind": "gripper",
+        "joints_on_arm": True,  # fingers live in the arm's articulation: nothing to spawn
+        "drive_joint": joints[0],
+        "coupled_drive_joints": tuple(joints[1:]),
+        "open_position": open_position,
+        "closed_position": closed_position,
+        "position_unit": unit,
+        "holding_tolerance": _finite(attrs, "holding_tolerance", 0.001),
+        "tcp_offset_m": _finite(attrs, "tcp_offset_m", 0.0),
+        "jaw_box_mm": tuple(attrs.get("jaw_box_mm", (36.0, 146.0, 153.0))),
+        # ponytail: USD finger drives are often far too stiff for a held object
+        # (RidgebackFranka: 1e7, 1200 N); these defaults give ~50 N at 25 mm short
+        # of closed for a prismatic hand. Tune per hand.
+        "drive_stiffness": _finite(attrs, "drive_stiffness", 2000.0),
+        "drive_damping": _finite(attrs, "drive_damping", 100.0),
+        "gripper_mode": "position",
+    }
+
+
 def default_rendering_dt(physics_dt: float, capture_rate_hz: float) -> float:
     """Render once per capture sample when that is a whole number of physics
     steps, otherwise once per physics step.
@@ -629,6 +687,41 @@ def _usd_drive_gains(root_prim: Any, names: set[str]) -> dict[str, tuple[float, 
             damping = drive.GetDampingAttr().Get() or 0.0
             gains[prim.GetName()] = (stiffness * scale, damping * scale)
     return gains
+
+
+def _prismatic_joint_names(root_prim: Any) -> set[str]:
+    """Names of the prismatic joints under an articulation (DOF names in Isaac)."""
+    from pxr import Usd, UsdPhysics
+
+    return {
+        prim.GetName()
+        for prim in Usd.PrimRange(root_prim)
+        if prim.IsA(UsdPhysics.PrismaticJoint)
+    }
+
+
+def _pin_link_to_world(
+    stage: Any,
+    link_path: str,
+    position: Sequence[float],
+    orientation_wxyz: Sequence[float] | None,
+) -> None:
+    """Fix a floating articulation's root link to the world at its spawn pose.
+
+    Some mobile-manipulator USDs (e.g. Isaac's RidgebackFranka) drive the base
+    through virtual x/y/yaw joints hanging off a dynamic root link. Without an
+    anchor that root recoils instead of the chassis moving."""
+    from pxr import Gf, Sdf, UsdPhysics
+
+    if not stage.GetPrimAtPath(link_path).IsValid():
+        raise ValueError(f"fixed_base_link: no prim at {link_path}")
+    w, x, y, z = orientation_wxyz if orientation_wxyz is not None else (1.0, 0.0, 0.0, 0.0)
+    joint = UsdPhysics.FixedJoint.Define(stage, f"{link_path}_viam_fixed_base")
+    joint.CreateBody1Rel().SetTargets([Sdf.Path(link_path)])  # body0 unset = world
+    joint.CreateLocalPos0Attr(Gf.Vec3f(*[float(v) for v in position]))
+    joint.CreateLocalRot0Attr(Gf.Quatf(float(w), Gf.Vec3f(float(x), float(y), float(z))))
+    joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
+    joint.CreateLocalRot1Attr(Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0)))
 
 
 def _reset_articulation_at_pose(
@@ -2618,10 +2711,30 @@ class SimManager:
             self._isaac.SingleXFormPrim(prim_path).set_world_pose(**pose_kwargs)
         except Exception:
             LOGGER.exception("failed to set base pose for %s", name)
+        if attrs.get("fixed_base_link"):
+            # PhysX decides fixed vs floating base when it builds the articulation
+            # on play; a joint authored while playing becomes a loose constraint
+            # that the root slides against. Stop first; the reset below re-plays.
+            self.world.stop()
+            _pin_link_to_world(
+                self._isaac.get_prim_at_path(prim_path).GetStage(),
+                f"{prim_path}/{attrs['fixed_base_link']}",
+                position,
+                orientation,
+            )
 
         art = self._isaac.SingleArticulation(prim_path=prim_path, name=name)
         self.world.scene.add(art)
         _reset_articulation_at_pose(self._reset_world, art, position, orientation)
+        if attrs.get("fixed_base_link"):
+            view = getattr(getattr(art, "_articulation_view", None), "_physics_view", None)
+            LOGGER.info(
+                "arm %s: pinned %s/%s to the world; physx fixed_base=%s",
+                name,
+                prim_path,
+                attrs["fixed_base_link"],
+                getattr(getattr(view, "shared_metatype", None), "fixed_base", "unknown"),
+            )
         self._restore_shared_base_gains()
         handle = self._isaac_arm_handle(name, attrs, meta, art, prim_path)
         self._arm_articulations[prim_path] = art
@@ -2647,7 +2760,7 @@ class SimManager:
 
         initial_deg = attrs.get("initial_joint_positions_deg")
         try:
-            return IsaacArmHandle(
+            handle = IsaacArmHandle(
                 self,
                 art,
                 ee,
@@ -2680,21 +2793,19 @@ class SimManager:
             )
         except ValueError as exc:
             raise ValueError(f"arm {name!r}: {exc}") from exc
+        root = self._isaac.get_prim_at_path(prim_path)
+        if hasattr(root, "GetStage"):  # a real USD prim (unit-test stand-ins lack one)
+            sliding = _prismatic_joint_names(root)
+            handle.prismatic = tuple(joint in sliding for joint in handle.joint_names())
+        return handle
 
     def create_gripper(self, name: str, attrs: dict[str, Any]) -> "GripperHandle":
         """Attach a supported gripper to an already-created arm articulation."""
         self._require_booted()
         gripper_attrs = dict(attrs)
-        gripper_attrs.setdefault("asset", "robotiq_2f_85")
-        asset = str(gripper_attrs["asset"])
-        meta = KNOWN_ASSETS.get(asset)
-        if meta is None or meta.get("kind") != "gripper":
-            known = sorted(
-                name
-                for name, value in KNOWN_ASSETS.items()
-                if value.get("kind") == "gripper"
-            )
-            raise ValueError(f"unknown gripper asset {asset!r}; known: {known}")
+        if "joint_names" not in gripper_attrs:
+            gripper_attrs.setdefault("asset", "robotiq_2f_85")
+        meta = gripper_meta(gripper_attrs)
 
         arm_name = str(gripper_attrs.get("arm", ""))
         arm_entry = self._handles.get(arm_name)
@@ -2706,11 +2817,15 @@ class SimManager:
         integrated_arm_asset = meta.get("integrated_arm_asset")
         if integrated_arm_asset and arm_attrs.get("asset") != integrated_arm_asset:
             raise ValueError(
-                f"gripper {asset!r} requires arm asset {integrated_arm_asset!r}, "
+                f"gripper {gripper_attrs.get('asset')!r} requires arm asset {integrated_arm_asset!r}, "
                 f"got {arm_attrs.get('asset')!r}"
             )
         if self.mock:
             factory = lambda: MockGripperHandle(name, gripper_attrs, arm_handle)
+        elif meta.get("joints_on_arm"):
+            factory = lambda: self.run(
+                lambda: self._create_joint_gripper_isaac(name, arm_handle, meta)
+            )
         elif integrated_arm_asset:
             factory = lambda: self.run(
                 lambda: self._create_integrated_gripper_isaac(
@@ -2725,6 +2840,33 @@ class SimManager:
                 timeout=120.0,
             )
         return self._cached_handle("gripper", name, gripper_attrs, factory)
+
+    def _create_joint_gripper_isaac(
+        self, name: str, arm: "ArmHandle", meta: dict[str, Any]
+    ) -> "IsaacGripperHandle":
+        """Drive finger joints that are already part of the arm's articulation."""
+        if not isinstance(arm, IsaacArmHandle):
+            raise ValueError(f"gripper {name!r}: configured arm is not an Isaac arm")
+        names = list(arm._art.dof_names)
+        joints = [meta["drive_joint"], *meta["coupled_drive_joints"]]
+        missing = [joint for joint in joints if joint not in names]
+        if missing:
+            raise ValueError(
+                f"gripper {name!r}: joints {missing} not found in articulation DOFs: {names}"
+            )
+        return IsaacGripperHandle(
+            self,
+            arm._art,
+            meta["drive_joint"],
+            meta["open_position"],
+            meta["closed_position"],
+            meta["holding_tolerance"],
+            position_unit=meta["position_unit"],
+            coupled_drive_joints=meta["coupled_drive_joints"],
+            drive_coupled=True,
+            drive_stiffness=meta["drive_stiffness"],
+            drive_damping=meta["drive_damping"],
+        )
 
     def _create_integrated_gripper_isaac(
         self,
@@ -3321,6 +3463,8 @@ class SimManager:
     def _create_base_isaac(self, name: str, attrs: dict[str, Any]) -> "IsaacBaseHandle":
         from .spatial import to_vec3
 
+        if attrs.get("planar_joints"):
+            return self._create_planar_base_isaac(name, attrs)
         usd, meta = self._resolve_usd(attrs)
         prim_path = attrs.get("prim_path") or f"/World/{_prim_name(name)}"
         wheel_joints = attrs.get("wheel_joints") or meta.get("wheel_joints")
@@ -3386,6 +3530,30 @@ class SimManager:
             self._bind_preview_surface(
                 path, diffuse_color=marker["color"], roughness=0.6, metallic=0.0
             )
+
+    def _create_planar_base_isaac(
+        self, name: str, attrs: dict[str, Any]
+    ) -> "PlanarJointBaseHandle":
+        """A holonomic base driven through an articulation's x/y/yaw joints (e.g.
+        RidgebackFranka's virtual base joints), sharing the articulation an arm
+        on the same prim_path already loaded."""
+        joints = list(attrs["planar_joints"])
+        if len(joints) != 3:
+            raise ValueError(f"base {name!r}: planar_joints must be [x, y, yaw] joint names")
+        prim_path = attrs.get("prim_path") or f"/World/{_prim_name(name)}"
+        art = self._arm_articulations.get(prim_path)
+        if art is None:
+            raise ValueError(
+                f"base {name!r}: planar_joints drives the articulation an arm on "
+                f"{prim_path} loads; configure that arm and add it to depends_on"
+            )
+        names = list(art.dof_names)
+        missing = [joint for joint in joints if joint not in names]
+        if missing:
+            raise ValueError(f"base {name!r}: joints {missing} not in DOFs: {names}")
+        handle = PlanarJointBaseHandle(self, art, [names.index(j) for j in joints])
+        self.world.add_physics_callback(f"{name}_drive", handle._on_physics_step)
+        return handle
 
     # ------------------------------------------------------------------
     # rigid bodies: floating props, thruster motors, movement sensors
@@ -3721,6 +3889,9 @@ class ArmHandle:
     _sim: "SimManager"
     _base_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
     _base_orientation: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
+    # per joint_names() entry: True for a prismatic joint (native meters, Viam mm);
+    # empty means every joint is revolute (native radians, Viam degrees)
+    prismatic: tuple[bool, ...] = ()
 
     def get_joint_positions(self) -> list[float]:  # radians
         raise NotImplementedError
@@ -4522,6 +4693,7 @@ class IsaacGripperHandle(GripperHandle):
         drive_stiffness: float = GRIPPER_DRIVE_STIFFNESS,
         drive_damping: float = GRIPPER_DRIVE_DAMPING,
         coupled_drive_joints: Sequence[str] = (),
+        drive_coupled: bool = False,
         contact_view: Any = None,
         contact_dt: float = 1.0 / 60.0,
     ) -> None:
@@ -4547,10 +4719,12 @@ class IsaacGripperHandle(GripperHandle):
         )
         names = list(articulation.dof_names)
         self._index = names.index(drive_joint)
-        self._drive_indices = [self._index]
         self._measure_indices = [self._index] + [
             names.index(name) for name in coupled_drive_joints if name in names
         ]
+        # Mimic-coupled fingers (Robotiq, Lite6) follow the drive joint; independent
+        # ones (Franka hand) need the same target driven on each.
+        self._drive_indices = list(self._measure_indices) if drive_coupled else [self._index]
         self._target: float | None = None
         self._has_progressed = False
         self._best_gap: float | None = None
@@ -4732,6 +4906,11 @@ class IsaacGripperHandle(GripperHandle):
             self._start_effort_close()
 
     def stop(self) -> None:
+        # viam-server calls Stop when the session that sent Grab ends; a settled
+        # grip has nothing to stop, and re-targeting the jaw where it stalled
+        # would drop both the squeeze and the holding latch.
+        if self.is_holding():
+            return
         self.set_jaw(self.get_jaw())
 
     def _sim_time(self) -> float:
@@ -4808,10 +4987,10 @@ class MockGripperHandle(GripperHandle):
     def __init__(self, name: str, attrs: dict[str, Any], arm: ArmHandle) -> None:
         self.name = name
         self._arm = arm
-        meta = KNOWN_ASSETS[str(attrs.get("asset", "robotiq_2f_85"))]
+        meta = gripper_meta(attrs)
         self._position_unit = str(meta.get("position_unit", "rad"))
         self._binary = str(meta.get("gripper_mode", "position")) == "binary"
-        if self._position_unit == "rad":
+        if "open_deg" in meta:
             self._open = math.radians(float(attrs.get("open_deg", meta["open_deg"])))
             self._closed = math.radians(
                 float(attrs.get("closed_deg", meta["closed_deg"]))
@@ -5065,7 +5244,11 @@ class MockCameraHandle(CameraHandle):
 
 
 class BaseHandle:
-    def set_velocity(self, linear_mps: float, angular_rps: float) -> None:
+    def set_velocity(
+        self, linear_mps: float, angular_rps: float, left_mps: float = 0.0
+    ) -> None:
+        """Forward and leftward speed in the base frame; only a holonomic base
+        honors left_mps."""
         raise NotImplementedError
 
     def stop(self) -> None:
@@ -5098,7 +5281,9 @@ class IsaacBaseHandle(BaseHandle):
         except Exception:
             LOGGER.exception("error driving base")
 
-    def set_velocity(self, linear_mps: float, angular_rps: float) -> None:
+    def set_velocity(
+        self, linear_mps: float, angular_rps: float, left_mps: float = 0.0
+    ) -> None:
         with self._lock:
             self._cmd = (float(linear_mps), float(angular_rps))
 
@@ -5110,6 +5295,83 @@ class IsaacBaseHandle(BaseHandle):
             return self._cmd != (0.0, 0.0)
 
 
+class PlanarJointBaseHandle(BaseHandle):
+    """Holonomic base over [x, y, yaw] joints. While a velocity is commanded,
+    each physics step advances the joints' position targets by the base-frame
+    velocity rotated into the joint (world) frame; stopping leaves the last
+    target latched, so the stiff USD drives hold the pose."""
+
+    def __init__(self, sim: SimManager, articulation, indices: list[int]) -> None:
+        self._sim = sim
+        self._art = articulation
+        self._indices = indices
+        self._cmd = (0.0, 0.0, 0.0)  # forward m/s, yaw rad/s, left m/s
+        self._remaining_s: float | None = None  # sim-time budget of a bounded move
+        self._target: list[float] | None = None
+        self._lock = threading.Lock()
+
+    def _on_physics_step(self, step_size: float) -> None:
+        import numpy as np
+
+        with self._lock:
+            forward, yaw_rate, left = self._cmd
+            if self._remaining_s is not None:
+                step_size = min(step_size, self._remaining_s)
+                self._remaining_s -= step_size
+                if self._remaining_s <= 0.0:
+                    self._cmd, self._remaining_s = (0.0, 0.0, 0.0), None
+        if (forward, yaw_rate, left) == (0.0, 0.0, 0.0) or step_size <= 0.0:
+            self._target = None
+            return
+        try:
+            if self._target is None:
+                self._target = [
+                    float(v)
+                    for v in self._art.get_joint_positions(joint_indices=self._indices)
+                ]
+            self._target = planar_step(self._target, forward, left, yaw_rate, step_size)
+            self._art.apply_action(
+                self._sim._isaac.ArticulationAction(
+                    joint_positions=np.asarray(self._target, dtype=float),
+                    joint_indices=self._indices,
+                )
+            )
+        except Exception:
+            LOGGER.exception("error driving planar base")
+
+    def set_velocity(
+        self, linear_mps: float, angular_rps: float, left_mps: float = 0.0
+    ) -> None:
+        with self._lock:
+            self._cmd = (float(linear_mps), float(angular_rps), float(left_mps))
+            self._remaining_s = None
+
+    def drive_for(
+        self, linear_mps: float, angular_rps: float, duration_s: float, left_mps: float = 0.0
+    ) -> None:
+        """Hold a velocity for exactly duration_s of simulator time, so
+        MoveStraight/Spin land on target however fast the sim runs."""
+        with self._lock:
+            self._cmd = (float(linear_mps), float(angular_rps), float(left_mps))
+            self._remaining_s = float(duration_s)
+
+    def stop(self) -> None:
+        self.set_velocity(0.0, 0.0)
+
+    def is_moving(self) -> bool:
+        with self._lock:
+            return self._cmd != (0.0, 0.0, 0.0)
+
+
+def planar_step(
+    pose: Sequence[float], forward: float, left: float, yaw_rate: float, dt: float
+) -> list[float]:
+    """Advance an (x, y, yaw) pose by a base-frame velocity over dt."""
+    x, y, yaw = pose
+    c, s = math.cos(yaw), math.sin(yaw)
+    return [x + (c * forward - s * left) * dt, y + (s * forward + c * left) * dt, yaw + yaw_rate * dt]
+
+
 class MockBaseHandle(BaseHandle):
     def __init__(self, name: str, attrs: dict[str, Any]) -> None:
         self.name = name
@@ -5118,7 +5380,9 @@ class MockBaseHandle(BaseHandle):
         self._cmd = (0.0, 0.0)
         self._lock = threading.Lock()
 
-    def set_velocity(self, linear_mps: float, angular_rps: float) -> None:
+    def set_velocity(
+        self, linear_mps: float, angular_rps: float, left_mps: float = 0.0
+    ) -> None:
         with self._lock:
             self._cmd = (float(linear_mps), float(angular_rps))
 

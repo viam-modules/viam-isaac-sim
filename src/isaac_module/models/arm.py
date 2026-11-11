@@ -10,6 +10,9 @@ Attributes:
   end_effector_prim (string)       - prim path whose world pose GetEndPosition reports;
                                      known assets provide a default when available
   arm_model (string)               - optional episode manifest label for a custom USD
+  fixed_base_link (string)         - link under prim_path to fix to the world at the
+                                     spawn pose, for floating-root USDs whose base
+                                     moves through virtual joints (RidgebackFranka: "world")
   joint_names ([string])           - articulation DOFs this arm drives, in order;
                                      overrides the known asset's joints (default:
                                      all DOFs). Lets several arms share one
@@ -208,6 +211,12 @@ def _is_moving_velocity_threshold(
     return threshold
 
 
+def _scales(handle: Any, count: int) -> list[float]:
+    """Multipliers from native joint units (rad | m) to Viam's (deg | mm)."""
+    flags = getattr(handle, "prismatic", ()) or (False,) * count
+    return [1000.0 if flag else 180.0 / math.pi for flag in flags]
+
+
 class IsaacArm(Arm, EasyResource):
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "arm")
 
@@ -365,8 +374,10 @@ class IsaacArm(Arm, EasyResource):
     async def move_to_joint_positions(
         self, positions: JointPositions, **kwargs
     ) -> None:
-        targets = [math.radians(v) for v in positions.values]
         handle = self._h()
+        targets = [
+            v / s for v, s in zip(positions.values, _scales(handle, len(positions.values)))
+        ]
         self._moving_count += 1
         try:
             await asyncio.to_thread(handle.set_joint_targets, targets)
@@ -393,7 +404,10 @@ class IsaacArm(Arm, EasyResource):
         joint by more than `path_max_step_deg`; otherwise drives would cut
         corners past intermediate waypoints they cannot reach in one tick."""
         handle = self._h()
-        raw = [[math.radians(v) for v in wp.values] for wp in positions]
+        raw = [
+            [v / s for v, s in zip(wp.values, _scales(handle, len(wp.values)))]
+            for wp in positions
+        ]
         if not raw:
             return
 
@@ -450,7 +464,10 @@ class IsaacArm(Arm, EasyResource):
                     JointTrajectoryPoint(
                         time_s=(point.time - batch_start).total_seconds(),
                         positions=tuple(
-                            math.radians(float(value)) for value in point.positions
+                            float(value) / scale
+                            for value, scale in zip(
+                                point.positions, _scales(handle, len(point.positions))
+                            )
                         ),
                     )
                 )
@@ -494,8 +511,11 @@ class IsaacArm(Arm, EasyResource):
             yield Arm.TrajectoryUpdate()
 
     async def get_joint_positions(self, **kwargs) -> JointPositions:
-        radians = await asyncio.to_thread(self._h().get_joint_positions)
-        return JointPositions(values=[math.degrees(r) for r in radians])
+        handle = self._h()
+        native = await asyncio.to_thread(handle.get_joint_positions)
+        return JointPositions(
+            values=[v * s for v, s in zip(native, _scales(handle, len(native)))]
+        )
 
     async def stop(self, **kwargs) -> None:
         await asyncio.to_thread(self._h().stop)
