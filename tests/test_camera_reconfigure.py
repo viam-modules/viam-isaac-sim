@@ -39,7 +39,8 @@ def test_camera_frame_rejects_legacy_pose_conflicts():
         {"world": "sim-world", "target": [0, 0, 0]},
     )
     config.frame.parent = "world"
-    config.frame.orientation.quaternion.w = 1
+    config.frame.orientation.vector_degrees.x = 1
+    config.frame.orientation.vector_degrees.theta = -90
 
     with pytest.raises(ValueError, match="attributes.target conflicts"):
         IsaacCamera.validate_config(config)

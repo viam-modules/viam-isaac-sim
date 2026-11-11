@@ -7,6 +7,7 @@ from isaac_module.spatial import (
     orbit_to_position,
     position_to_orbit,
     ov_to_quat,
+    pose_in_frame,
     quat_from_axis_angle,
     quat_from_euler_deg,
     quat_mul,
@@ -89,6 +90,20 @@ def test_rotate_helper():
 def test_mul_identity():
     q = quat_from_euler_deg(11, 22, 33)
     assert quat_mul(q, (1, 0, 0, 0)) == pytest.approx(q)
+
+
+def test_pose_in_frame_undoes_placing_a_pose_in_that_frame():
+    frame_position, frame_rotation = (1.5, -0.2, 0.3), quat_from_euler_deg(30, -45, 120)
+    local_position, local_rotation = (0.4, 0.1, -0.6), quat_from_euler_deg(5, 10, 15)
+    offset = quat_rotate(frame_rotation, local_position)
+    world_position = tuple(f + o for f, o in zip(frame_position, offset))
+    world_rotation = quat_mul(frame_rotation, local_rotation)
+
+    position, rotation = pose_in_frame(
+        frame_position, frame_rotation, world_position, world_rotation
+    )
+    assert position == pytest.approx(local_position, abs=1e-9)
+    assert rotation == pytest.approx(local_rotation, abs=1e-9)
 
 
 def test_look_at_points_at_target():

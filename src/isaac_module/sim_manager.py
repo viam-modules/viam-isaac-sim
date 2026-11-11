@@ -93,6 +93,8 @@ def _visual_material_properties(name: Any) -> dict[str, Any]:
     return VISUAL_MATERIAL_PRESETS[name]
 
 
+# Isaac's UR USDs reach +X at zero joints; ur5e.json and ur20.json reach -X,
+# so those assets spawn turned to match (ur3e.json already matches its USD).
 KNOWN_ASSETS: dict[str, dict[str, Any]] = {
     "ur3e": {
         "usd": ["/Isaac/Robots/UniversalRobots/ur3e/ur3e.usd"],
@@ -105,6 +107,7 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         "kinematics": f"{_UR_KINEMATICS}/ur5e.json",
         "joint_names": UR_JOINT_NAMES,
         "end_effector_link": "wrist_3_link",
+        "base_yaw_offset_deg": 180.0,
     },
     "ur10": {
         "usd": ["/Isaac/Robots/UniversalRobots/ur10/ur10.usd"],
@@ -126,6 +129,7 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         "kinematics": f"{_UR_KINEMATICS}/ur20.json",
         "joint_names": UR_JOINT_NAMES,
         "end_effector_link": "wrist_3_link",
+        "base_yaw_offset_deg": 180.0,
     },
     "lite6": {
         "usd": ["/Isaac/Robots/Ufactory/lite6/lite6.usd"],
@@ -315,9 +319,74 @@ def _reset_articulation_at_pose(
     articulation.set_world_pose(**pose)
 
 
+def _author_initial_joint_state(
+    asset_prim: Any, joint_names: Sequence[str], positions_deg: Sequence[float]
+) -> None:
+    """Write each joint's start position and drive target (degrees) to USD.
+    PhysX starts the arm there, and Isaac derives the post-reset joint state
+    from the drive targets, so world.reset() returns here too."""
+    from pxr import PhysxSchema, Usd, UsdPhysics
+
+    if len(positions_deg) != len(joint_names):
+        raise ValueError(
+            f"initial_joint_positions_deg needs {len(joint_names)} values "
+            f"({', '.join(joint_names)}), got {len(positions_deg)}"
+        )
+    joints = {
+        prim.GetName(): prim
+        for prim in Usd.PrimRange(asset_prim)
+        if prim.IsA(UsdPhysics.Joint)
+    }
+    for name, degrees in zip(joint_names, positions_deg):
+        joint = joints.get(name)
+        if joint is None:
+            raise ValueError(
+                f"initial_joint_positions_deg: joint {name!r} not found under "
+                f"{asset_prim.GetPath()}"
+            )
+        if not joint.IsA(UsdPhysics.RevoluteJoint):
+            raise ValueError(
+                f"initial_joint_positions_deg: joint {name!r} is not revolute"
+            )
+        UsdPhysics.DriveAPI.Apply(joint, "angular").CreateTargetPositionAttr(
+            float(degrees)
+        )
+        state = PhysxSchema.JointStateAPI.Apply(joint, "angular")
+        state.CreatePositionAttr(float(degrees))
+        state.CreateVelocityAttr(0.0)
+
+
+def _arm_base_orientation(
+    frame_orientation: Sequence[float] | None, yaw_offset_deg: float
+) -> list[float] | None:
+    """Orientation (w,x,y,z) for an arm's USD root prim: the Viam frame
+    orientation followed by a yaw about the base Z that aligns the USD's
+    root frame with the base frame of the served kinematics."""
+    if yaw_offset_deg == 0.0:
+        return list(frame_orientation) if frame_orientation is not None else None
+    from .spatial import quat_from_euler_deg, quat_mul
+
+    frame = (
+        tuple(float(v) for v in frame_orientation)
+        if frame_orientation is not None
+        else (1.0, 0.0, 0.0, 0.0)
+    )
+    return list(quat_mul(frame, quat_from_euler_deg(0.0, 0.0, yaw_offset_deg)))
+
+
+def camera_axes(attrs: dict[str, Any]) -> str:
+    """The Isaac camera_axes a camera is posed in; point clouds are returned
+    in the same axes so Viam's frame system places them correctly."""
+    if attrs.get("parent_prim"):
+        if attrs.get("local_orientation_wxyz") is not None:
+            return str(attrs.get("local_camera_axes", "ros"))
+        return "usd"
+    return str(attrs.get("camera_axes", "world"))
+
+
 def _parented_camera_pose(
     attrs: dict[str, Any],
-) -> tuple[tuple[float, float, float], tuple[float, float, float, float], str]:
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
     from .spatial import quat_from_euler_deg
 
     local_position = _vector3(
@@ -327,13 +396,12 @@ def _parented_camera_pose(
         return (
             local_position,
             _quaternion(attrs["local_orientation_wxyz"], "local_orientation_wxyz"),
-            str(attrs.get("local_camera_axes", "ros")),
         )
     roll, pitch, yaw = _vector3(
         attrs.get("local_orientation_rpy_deg", (180.0, 0.0, 0.0)),
         "local_orientation_rpy_deg",
     )
-    return local_position, quat_from_euler_deg(roll, pitch, yaw), "usd"
+    return local_position, quat_from_euler_deg(roll, pitch, yaw)
 
 
 def _values_close(actual: Sequence[float], expected: Sequence[float]) -> bool:
@@ -355,18 +423,16 @@ def _apply_camera_configuration(camera: Any, attrs: dict[str, Any]) -> None:
     parent = attrs.get("parent_prim")
     expected_position: Sequence[float] | None = None
     expected_orientation: Sequence[float] | None = None
-    camera_axes = "world"
+    axes = camera_axes(attrs)
     if parent:
-        expected_position, expected_orientation, camera_axes = _parented_camera_pose(
-            attrs
-        )
+        expected_position, expected_orientation = _parented_camera_pose(attrs)
         camera.set_local_pose(
             list(expected_position),
             list(expected_orientation),
-            camera_axes=camera_axes,
+            camera_axes=axes,
         )
         actual_position, actual_orientation = camera.get_local_pose(
-            camera_axes=camera_axes
+            camera_axes=axes
         )
     else:
         if attrs.get("target") is not None:
@@ -399,10 +465,10 @@ def _apply_camera_configuration(camera: Any, attrs: dict[str, Any]) -> None:
                 list(expected_orientation)
                 if expected_orientation is not None
                 else None,
-                camera_axes=camera_axes,
+                camera_axes=axes,
             )
         actual_position, actual_orientation = camera.get_world_pose(
-            camera_axes=camera_axes
+            camera_axes=axes
         )
 
     if expected_position is not None and not _values_close(
@@ -1862,6 +1928,7 @@ class SimManager:
             "local_orientation_wxyz",
             "local_orientation_rpy_deg",
             "local_camera_axes",
+            "camera_axes",
             "fov_deg",
             "near_clip_m",
         }
@@ -1958,16 +2025,28 @@ class SimManager:
                         f"{variant_set}={selection!r}"
                     )
 
+        initial_deg = attrs.get("initial_joint_positions_deg")
+        if initial_deg is not None:
+            if not meta.get("joint_names"):
+                raise ValueError(
+                    f"arm {name!r}: initial_joint_positions_deg needs a known "
+                    "asset so the joint order is defined"
+                )
+            _author_initial_joint_state(
+                self._isaac.get_prim_at_path(prim_path),
+                meta["joint_names"],
+                [float(v) for v in initial_deg],
+            )
+
         # Set the base pose directly on the USD prim. The `position=` /
         # `orientation=` kwargs on SingleArticulation don't persist across the
         # world.reset() below when another articulation is already in the
         # scene, so every arm silently ends up at the world origin and their
         # bodies penetrate. Writing to USD persists across resets.
         position = to_vec3(attrs.get("position"))
-        orientation = (
-            [float(v) for v in attrs["orientation_wxyz"]]
-            if attrs.get("orientation_wxyz") is not None
-            else None
+        orientation = _arm_base_orientation(
+            attrs.get("orientation_wxyz"),
+            float(meta.get("base_yaw_offset_deg", 0.0)),
         )
         pose_kwargs: dict[str, Any] = {"position": list(position)}
         if orientation is not None:
@@ -2007,6 +2086,14 @@ class SimManager:
                 if "max_joint_deg_s2" in attrs
                 else None
             ),
+            initial_target=(
+                [math.radians(float(v)) for v in initial_deg]
+                if initial_deg is not None
+                else None
+            ),
+            # the Viam frame, not the USD root pose with its base_yaw_offset_deg
+            base_position=position,
+            base_orientation=attrs.get("orientation_wxyz"),
         )
 
     def create_gripper(self, name: str, attrs: dict[str, Any]) -> "GripperHandle":
@@ -2534,6 +2621,8 @@ class SimManager:
 
         cam = self._isaac.Camera(**kwargs)
         cam.initialize()
+        if attrs.get("depth"):
+            cam.add_distance_to_image_plane_to_frame()
         _apply_camera_configuration(cam, attrs)
         return IsaacCameraHandle(self, cam)
 
@@ -2923,6 +3012,8 @@ class JointTrajectoryPoint:
 
 class ArmHandle:
     _sim: "SimManager"
+    _base_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    _base_orientation: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
 
     def get_joint_positions(self) -> list[float]:  # radians
         raise NotImplementedError
@@ -3008,6 +3099,18 @@ class ArmHandle:
         """((x,y,z) meters, (w,x,y,z) quaternion) of the end effector."""
         raise NotImplementedError
 
+    def get_end_pose_in_base(
+        self,
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+        """The end effector pose in the arm's base frame, as GetEndPosition
+        reports it."""
+        from .spatial import pose_in_frame
+
+        position, rotation = self.get_end_pose()
+        return pose_in_frame(
+            self._base_position, self._base_orientation, position, rotation
+        )
+
     def capture_state(self):
         """Return positions, velocities, target, and EE pose on the sim thread."""
         raise NotImplementedError
@@ -3027,6 +3130,9 @@ class IsaacArmHandle(ArmHandle):
         ),
         max_joint_deg_s: float | None = None,
         max_joint_deg_s2: float | None = None,
+        initial_target: Sequence[float] | None = None,
+        base_position: Sequence[float] = (0.0, 0.0, 0.0),
+        base_orientation: Sequence[float] | None = None,
     ) -> None:
         if (
             not math.isfinite(is_moving_velocity_threshold_rad_s)
@@ -3047,6 +3153,9 @@ class IsaacArmHandle(ArmHandle):
         self._art = articulation
         self._ee = ee_prim
         self._prim_path = prim_path
+        self._base_position = tuple(float(v) for v in base_position)
+        if base_orientation is not None:
+            self._base_orientation = _quaternion(base_orientation, "orientation_wxyz")
         self._joint_names = tuple(joint_names or tuple(articulation.dof_names))
         self._joint_indices: list[int] = []
         self._is_moving_velocity_threshold_rad_s = is_moving_velocity_threshold_rad_s
@@ -3057,7 +3166,9 @@ class IsaacArmHandle(ArmHandle):
             math.radians(max_joint_deg_s2) if max_joint_deg_s2 is not None else None
         )
         self.refresh_dofs()
-        self._target: list[float] | None = None
+        self._target: list[float] | None = (
+            list(initial_target) if initial_target is not None else None
+        )
         self._nudge: list[float] | None = None
         self._trajectory_callback_name = f"arm_trajectory_{id(self)}"
         self._trajectory: list[tuple[float, Any, tuple[float, ...]]] = []
@@ -3438,8 +3549,17 @@ class MockArmHandle(ArmHandle):
             else None
         )
         self._lock = threading.Lock()
-        self._start = [0.0] * dof
-        self._target = [0.0] * dof
+        initial_deg = attrs.get("initial_joint_positions_deg")
+        if initial_deg is not None and len(initial_deg) != dof:
+            raise ValueError(
+                f"initial_joint_positions_deg needs {dof} values, got {len(initial_deg)}"
+            )
+        self._start = (
+            [math.radians(float(v)) for v in initial_deg]
+            if initial_deg is not None
+            else [0.0] * dof
+        )
+        self._target = list(self._start)
         self._t0 = time.monotonic()
         self._trajectory_callback_name = f"arm_trajectory_{id(self)}"
         self._trajectory: tuple[JointTrajectoryPoint, ...] = ()
@@ -4071,6 +4191,14 @@ class CameraHandle:
         """Apply live-mutable camera configuration on the simulator thread."""
         raise NotImplementedError
 
+    def get_rgbd(self):
+        """(rgb (H, W, 3) uint8, depth (H, W) float32 meters) from one frame."""
+        raise NotImplementedError
+
+    def intrinsics(self) -> tuple[float, float, float, float]:
+        """(fx, fy, cx, cy) in pixels."""
+        raise NotImplementedError
+
 
 class IsaacCameraHandle(CameraHandle):
     def __init__(self, sim: SimManager, camera) -> None:
@@ -4091,6 +4219,28 @@ class IsaacCameraHandle(CameraHandle):
 
     def get_rgb(self):
         return self._sim.run(self.capture_rgb)
+
+    def _capture_rgbd(self):
+        import numpy as np
+
+        rgb = self.capture_rgb()
+        depth = self._cam.get_depth()
+        if depth is None or depth.size == 0:
+            raise RuntimeError("no depth frame available yet - is the simulation playing?")
+        return rgb, np.asarray(depth, dtype=np.float32).squeeze().copy()  # some versions return (H, W, 1)
+
+    def get_rgbd(self):
+        return self._sim.run(self._capture_rgbd)
+
+    def _intrinsics(self) -> tuple[float, float, float, float]:
+        # from the prim's real lens, so attached prim_path cameras without
+        # fov_deg are correct too
+        width, height = self._cam.get_resolution()
+        fx = width * self._cam.get_focal_length() / self._cam.get_horizontal_aperture()
+        return fx, fx, width / 2.0, height / 2.0
+
+    def intrinsics(self) -> tuple[float, float, float, float]:
+        return self._sim.run(self._intrinsics)
 
 
 class MockCameraHandle(CameraHandle):
@@ -4116,6 +4266,18 @@ class MockCameraHandle(CameraHandle):
 
     def capture_rgb(self):
         return self.get_rgb()
+
+    def get_rgbd(self):
+        import numpy as np
+
+        # tilted plane: 1 m at the top row to 2 m at the bottom
+        rows = np.linspace(1.0, 2.0, self._h, dtype=np.float32)
+        return self.get_rgb(), np.repeat(rows[:, None], self._w, axis=1)
+
+    def intrinsics(self) -> tuple[float, float, float, float]:
+        fov = math.radians(float(self._attrs.get("fov_deg", 70.0)))
+        fx = (self._w / 2.0) / math.tan(fov / 2.0)
+        return fx, fx, self._w / 2.0, self._h / 2.0
 
 
 class BaseHandle:

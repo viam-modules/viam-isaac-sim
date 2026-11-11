@@ -114,9 +114,26 @@ def test_arm_parented_camera_frame_becomes_ros_local_pose():
         },
     )
 
-    position, orientation, axes = _parented_camera_pose(attrs)
+    position, orientation = _parented_camera_pose(attrs)
 
     assert position == pytest.approx((0.07125, -0.0274, 0.0235))
     assert quat_rotate(orientation, (1, 0, 0)) == pytest.approx((0, 1, 0), abs=1e-9)
-    assert axes == "ros"
     assert "local_orientation_rpy_deg" not in attrs
+
+
+def test_parented_camera_frame_rotated_into_prim():
+    """parent_prim_rpy_deg: the Viam parent frame sits rotated inside the prim
+    (lite6: arm end frame vs uflite_gripper_link), so the frame's pose is
+    rotated into prim coordinates before placing the camera."""
+    cfg = ComponentConfig(name="cam")
+    cfg.frame.parent = "arm"
+    cfg.frame.translation.x = 40
+    cfg.frame.translation.z = 40
+    cfg.frame.orientation.quaternion.w = 1
+    attrs = apply_camera_frame_to_attrs(
+        cfg, {"parent_prim": "/World/link", "parent_prim_rpy_deg": [0, 0, 180]}
+    )
+    assert attrs["local_position"] == pytest.approx([-0.04, 0.0, 0.04], abs=1e-9)
+    q = attrs["local_orientation_wxyz"]
+    assert quat_rotate(q, (1, 0, 0)) == pytest.approx((-1, 0, 0), abs=1e-9)
+    assert "parent_prim_rpy_deg" not in attrs
