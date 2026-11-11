@@ -2882,7 +2882,7 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=17.0.0,<26" },
     { name = "toppra", specifier = ">=0.6.10" },
     { name = "tqdm", specifier = ">=4.70.1" },
-    { name = "viam-sdk", specifier = ">=0.85.1" },
+    { name = "viam-sdk", specifier = ">=0.85.2" },
 ]
 provides-extras = ["full"]
 
@@ -2891,7 +2891,7 @@ dev = [{ name = "ruff", specifier = ">=0.17.0" }]
 
 [[package]]
 name = "viam-sdk"
-version = "0.85.1"
+version = "0.85.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "googleapis-common-protos" },
@@ -2901,17 +2901,17 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f1/f8/d84f7b922cefd9a0f585a8e4c5d9a028f85b48b14977076b1d2f06ced430/viam_sdk-0.85.1-py3-none-linux_armv6l.whl", hash = "sha256:1cbcd52993bf3965a6ef38c5f36725c7430ffec783e8edb66d68e77daa015e94", size = 7709431, upload-time = "2026-10-26T14:36:48.934Z" },
-    { url = "https://files.pythonhosted.org/packages/8b/e6/879adac627987ee21bf97631c38d0bdb254a42f030035ca208e660d6d1b6/viam_sdk-0.85.1-py3-none-linux_armv7l.whl", hash = "sha256:a1e509582f82d02d22c25528c41e34e8d356e4d893936629604fa1d951bf0091", size = 7709706, upload-time = "2026-10-26T14:36:51.128Z" },
-    { url = "https://files.pythonhosted.org/packages/79/db/2993a15b8e0cd9d9b31ac8b63692d16488274788406124b51da1777ce194/viam_sdk-0.85.1-py3-none-macosx_10_16_x86_64.whl", hash = "sha256:27ed030848d767e278cf40f154a7f28f12bc47ecc5c2b50984935321a2644525", size = 7060548, upload-time = "2026-10-26T14:36:52.966Z" },
-    { url = "https://files.pythonhosted.org/packages/1e/43/fb6c89ac686c522b3d5fa31a7999ce66d8da395a34379a9b29cba4976f02/viam_sdk-0.85.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:d928e1339b7e5ac639f64ea31a3721212c0e6f00ced149215b49da6bcc904e6a", size = 6881126, upload-time = "2026-10-26T14:36:54.662Z" },
-    { url = "https://files.pythonhosted.org/packages/ef/35/43b320c2b29b8e6ed2818a2949b1438df24486b187b79047c6a6f923285d/viam_sdk-0.85.1-py3-none-manylinux2014_aarch64.whl", hash = "sha256:9caae12e78a8566c33d535fa1205763da0eae867ca2c9d37f9b685a9834a20b9", size = 7883452, upload-time = "2026-10-26T14:36:56.606Z" },
-    { url = "https://files.pythonhosted.org/packages/75/1d/c98ad206acd43e1a23366a0269c490cde50fd46fff5e64953ebf1879a756/viam_sdk-0.85.1-py3-none-manylinux2014_x86_64.whl", hash = "sha256:16f3fc6b6b9427ba9515bb543fdf56ef288248162b57c44422be7b9069e525c1", size = 7666349, upload-time = "2026-10-26T14:36:58.495Z" },
-    { url = "https://files.pythonhosted.org/packages/ae/30/f867e3296b3c24c01d330df0a3312361df3bb7a5b4b427ab460f02878563/viam_sdk-0.85.1-py3-none-musllinux_1_2_aarch64.whl", hash = "sha256:a10bd454deff1d481587df1596aa961cd37054d0eb5284dcb36a4c466bc6b56a", size = 7880855, upload-time = "2026-10-26T14:37:00.255Z" },
-    { url = "https://files.pythonhosted.org/packages/91/97/09750835eb55329083a6b5746cc9a5c158dc6a0af03fa72443607c8a3a41/viam_sdk-0.85.1-py3-none-musllinux_1_2_armv7l.whl", hash = "sha256:73d7f9761873db8549f2169c7114af3464661d41590226ab989057e8526d7b9a", size = 7601114, upload-time = "2026-10-26T14:37:01.885Z" },
-    { url = "https://files.pythonhosted.org/packages/6a/71/97b5b54519c56d69195dc6b98ffe0aba4b163c21d79dbb923175c9e4629a/viam_sdk-0.85.1-py3-none-musllinux_1_2_i686.whl", hash = "sha256:14ead25bccf59eea07c857b4b50a3a8239fce86348766124cb39a9977a8c73d4", size = 7890821, upload-time = "2026-10-26T14:37:03.715Z" },
-    { url = "https://files.pythonhosted.org/packages/64/5a/92faf1c48cce5d6b36b0baf8e88218d25265b554993dd36f45171daab7c0/viam_sdk-0.85.1-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:fc02e182352cd72f501a7578325956e9da55a9b5e8a42988680917ab6662b2fd", size = 7881527, upload-time = "2026-10-26T14:37:05.617Z" },
-    { url = "https://files.pythonhosted.org/packages/1b/c7/b6473b8466a823fa5b5a23e94f78b10ba1de1a3bd28a4fffb5c4029ff469/viam_sdk-0.85.1-py3-none-win_amd64.whl", hash = "sha256:43754115f1d0bba088a01fab2ae782c41ad6188cd9ea856c62a49528f8afaddc", size = 6700249, upload-time = "2026-10-26T20:16:41.745Z" },
+    { url = "https://files.pythonhosted.org/packages/63/6c/1a9210d03d10898aac1d3ed15a30c3bd5cd66708313bf59ee02fce02fdc4/viam_sdk-0.85.2-py3-none-linux_armv6l.whl", hash = "sha256:d3bab21fc66cee67a2d708ef826210d73667cc2d70adddd5f3e633c6a6806cec", size = 7735654, upload-time = "2026-11-04T18:24:45.701Z" },
+    { url = "https://files.pythonhosted.org/packages/5a/d0/9413cc95e5967247af03a94d243380ca907c111924cc30a75edd16fd06e9/viam_sdk-0.85.2-py3-none-linux_armv7l.whl", hash = "sha256:f8aa373dc7395d847716402ab2fe49576c9eb4e3e4bdcb2a5c249787626f8ed1", size = 7735928, upload-time = "2026-11-04T18:24:47.743Z" },
+    { url = "https://files.pythonhosted.org/packages/24/40/f9caa534f3bba1c0a272d5eb0a54aeedd20ccf6ac86e84c779b808eb2995/viam_sdk-0.85.2-py3-none-macosx_10_16_x86_64.whl", hash = "sha256:2768e255c8bce3c1d541f8c3de139f1f322cb07a68ca700f74fbef0319fe6eda", size = 7074807, upload-time = "2026-11-04T18:24:49.163Z" },
+    { url = "https://files.pythonhosted.org/packages/78/d9/11f86c5d6fa45bb131a9b090551a179c6affcff48db78af317ed0d750daa/viam_sdk-0.85.2-py3-none-macosx_11_0_arm64.whl", hash = "sha256:7f851c7678b836c21f777072ff8777a085d07dedf22aaffc25286262c0909ea3", size = 6916044, upload-time = "2026-11-04T18:24:50.635Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/c2/3dacbf5ba0629b57c705ac4aee50b09a928477cd6eceb4ca1734eb8565b8/viam_sdk-0.85.2-py3-none-manylinux2014_aarch64.whl", hash = "sha256:e55e389b74c18dead7fccfaf2257703d5d1e39a4d834cd67f0d2b74d17ae47b3", size = 7903067, upload-time = "2026-11-04T18:24:52.189Z" },
+    { url = "https://files.pythonhosted.org/packages/c3/f6/9a45b2a77e9ce6ea10a22096b1c4b97ab6d2cc03b9f1e2f2ccc81b6f6d98/viam_sdk-0.85.2-py3-none-manylinux2014_x86_64.whl", hash = "sha256:94d24b2e3aa873e71d69d8ee76f3712d0a87f2ee7f9be7adc322eb88cbc808e9", size = 7698764, upload-time = "2026-11-04T18:24:53.948Z" },
+    { url = "https://files.pythonhosted.org/packages/28/9e/30cf24f8e25e2efd23bac71a7f9448204bf2648013d0c8c68d6594c2fe97/viam_sdk-0.85.2-py3-none-musllinux_1_2_aarch64.whl", hash = "sha256:76f65261ebbfd1f74a46bcb9ea5099c114d248bb0dd6702072e7e19b76e12ccc", size = 7896766, upload-time = "2026-11-04T18:24:55.817Z" },
+    { url = "https://files.pythonhosted.org/packages/55/d6/897d17c6e2d031b11ea017ce41f80ed2c31d50d5ef78dbe562f248f2e0f8/viam_sdk-0.85.2-py3-none-musllinux_1_2_armv7l.whl", hash = "sha256:af21f9f994836f6646b227f7e87ed944a2e150483884203a5e07580489d30b08", size = 7599970, upload-time = "2026-11-04T18:24:57.565Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/be/a6a932f9fc6ca7af04d04f248a4273192576f55ae3280cf75e02f4f1f073/viam_sdk-0.85.2-py3-none-musllinux_1_2_i686.whl", hash = "sha256:d38f87d370fb0ae1f22a17aee76c90b84fa6de4a1d4e2ff4e68e7b07c523deff", size = 7914240, upload-time = "2026-11-04T18:24:59.349Z" },
+    { url = "https://files.pythonhosted.org/packages/51/9c/3e8222a387309f5c28b8945241f0a0fb45be1f579c8f82fa20d953461f04/viam_sdk-0.85.2-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:ac52252520c3cb58f196f3b380f21041d2fd4f38761e39b5b41a91b4bb361a0f", size = 7910346, upload-time = "2026-11-04T18:25:02.295Z" },
+    { url = "https://files.pythonhosted.org/packages/14/a7/3a78ae6bdb425fd3470c53faf4a52b24bd45c36bb6eee0f78709687ed111/viam_sdk-0.85.2-py3-none-win_amd64.whl", hash = "sha256:bdbe3e6ee1c12f48b11b5993e8b4f0f16131dc47b4ae829aed56f8ec6d985f64", size = 6748564, upload-time = "2026-11-04T18:25:03.851Z" },
 ]
 
 [[package]]
