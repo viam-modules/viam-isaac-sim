@@ -6,7 +6,13 @@ import pytest
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
 
-from isaac_module.lidar import LIDAR_PRESETS, MockLidarHandle, _read_lidar_scan, effective_rate
+from isaac_module.lidar import (
+    LIDAR_PRESETS,
+    IsaacLidarHandle,
+    MockLidarHandle,
+    _read_lidar_scan,
+    effective_rate,
+)
 from isaac_module.models.lidar import IsaacLidar
 from isaac_module.models.utils import apply_lidar_frame_to_attrs, get_attrs
 from isaac_module.sim_manager import SimManager
@@ -191,5 +197,35 @@ def test_read_lidar_scan_drops_no_return_origin_points():
     assert out.tolist() == [[1, 2, 0]]
 
 
-def test_read_lidar_scan_all_zero_is_none():
-    assert _read_lidar_scan(_FakeAnnotator(np.zeros((3, 3), dtype=np.float32))) is None
+def test_read_lidar_scan_all_zero_is_empty_not_none():
+    # every beam missed is a real scan, distinct from "no data yet"
+    out = _read_lidar_scan(_FakeAnnotator(np.zeros((3, 3), dtype=np.float32)))
+    assert out.shape == (0, 3)
+    assert _read_lidar_scan(_FakeAnnotator(None)) is None
+
+
+def _isaac_handle(data):
+    h = IsaacLidarHandle.__new__(IsaacLidarHandle)  # skip the Isaac-only __init__
+    h._annotator = _FakeAnnotator(data)
+    h._rate = h._native_hz = 10.0
+    h._scan = None
+    return h
+
+
+def test_poll_empty_scan_replaces_old_one():
+    h = _isaac_handle(np.array([[1, 0, 0]], dtype=np.float32))
+    h.poll(0.1)
+    assert len(h.latest_scan()[1]) == 1
+    h._annotator = _FakeAnnotator(np.zeros((4, 3), dtype=np.float32))
+    h.poll(0.2)
+    assert h.latest_scan()[0] == 0.2 and len(h.latest_scan()[1]) == 0
+
+
+def test_poll_after_reset_waits_for_a_full_rotation():
+    h = _isaac_handle(np.array([[1, 0, 0]], dtype=np.float32))
+    h.poll(5.0)
+    h.poll(0.02)  # world reset: sim time went backwards
+    assert h.latest_scan() is None
+    h.poll(0.1)
+    assert h.latest_scan()[0] == 0.1
+

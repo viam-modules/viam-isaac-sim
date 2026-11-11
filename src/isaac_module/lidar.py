@@ -106,14 +106,15 @@ _SCAN_ANNOTATORS = (
 
 def _read_lidar_scan(annotator: Any) -> Optional[np.ndarray]:
     """The only Isaac-version shim: latest full scan as (N, 3) float32 meters
-    in the lidar frame, or None if the annotator has nothing yet."""
+    in the lidar frame (empty if every beam missed), or None if the annotator
+    has nothing yet."""
     data = annotator.get_data()
     points = data.get("data") if isinstance(data, dict) else data
     if points is None:
         return None
     points = np.asarray(points, dtype=np.float32).reshape(-1, 3)
     points = points[np.any(points != 0, axis=1)]  # RTX reports no-return beams as (0,0,0)
-    return points if len(points) else None
+    return points
 
 
 class IsaacLidarHandle(LidarHandle):
@@ -163,6 +164,7 @@ class IsaacLidarHandle(LidarHandle):
             raise RuntimeError(f"{name}: no RTX lidar scan-buffer annotator in this Isaac Sim")
         self._xform = sim._isaac.SingleXFormPrim(str(sensor.GetPath()))
         self._rate = effective_rate(attrs)
+        self._native_hz = preset.native_hz
         self._scan: Optional[Scan] = None
         self._apply_pose(attrs)
 
@@ -186,6 +188,12 @@ class IsaacLidarHandle(LidarHandle):
 
     def poll(self, now: float) -> None:
         """Called after each rendered frame on the sim thread."""
+        if self._scan is not None and now < self._scan[0]:
+            self._scan = None  # world reset: drop the pre-reset scan
+        # the buffer holds the previous full rotation until one completes
+        # after start/reset, so don't stamp it as new before then
+        if now < 1.0 / self._native_hz - 1e-9:
+            return
         if not _due(self._scan, now, self._rate):
             return
         points = _read_lidar_scan(self._annotator)
