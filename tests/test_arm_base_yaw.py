@@ -56,6 +56,9 @@ def _spawn(monkeypatch, attrs):
     poses = []
     resets = []
     manager = object.__new__(SimManager)
+    manager._arm_articulations = {}
+    manager._arm_usd_owners = {}
+    manager._shared_bases = []
     manager._resolve_usd = lambda a: (
         "/fake/arm.usd",
         KNOWN_ASSETS[a["asset"]] if a.get("asset") else {},

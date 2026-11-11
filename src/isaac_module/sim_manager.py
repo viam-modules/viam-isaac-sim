@@ -2589,14 +2589,15 @@ class SimManager:
 
         initial_deg = attrs.get("initial_joint_positions_deg")
         if initial_deg is not None:
-            if not meta.get("joint_names"):
+            joint_order = attrs.get("joint_names") or meta.get("joint_names")
+            if not joint_order:
                 raise ValueError(
-                    f"arm {name!r}: initial_joint_positions_deg needs a known "
-                    "asset so the joint order is defined"
+                    f"arm {name!r}: initial_joint_positions_deg needs joint_names "
+                    "or a known asset so the joint order is defined"
                 )
             _author_initial_joint_state(
                 self._isaac.get_prim_at_path(prim_path),
-                meta["joint_names"],
+                joint_order,
                 [float(v) for v in initial_deg],
             )
 

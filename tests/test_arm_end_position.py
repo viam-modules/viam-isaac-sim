@@ -54,6 +54,9 @@ def test_spawn_gives_the_handle_the_frame_pose_without_the_usd_yaw_offset(
 ):
     handle_kwargs = {}
     manager = object.__new__(SimManager)
+    manager._arm_articulations = {}
+    manager._arm_usd_owners = {}
+    manager._shared_bases = []
     manager._resolve_usd = lambda a: ("/fake/arm.usd", KNOWN_ASSETS[a["asset"]])
     manager._require_prim = lambda path: None
     manager._isaac = SimpleNamespace(
