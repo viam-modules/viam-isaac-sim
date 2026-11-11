@@ -24,6 +24,7 @@ What it is/does
 | `viam-labs:isaac-sim:arm` | `arm` | Spawns (or attaches to) an articulation - UR arms, Franka, or any USD - and exposes joint control. |
 | `viam-labs:isaac-sim:gripper` | `gripper` | Exposes a supported parallel gripper, including the Lite 6's integrated gripper. |
 | `viam-labs:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves RGB, and optionally depth and point clouds. |
+| `viam-labs:isaac-sim:lidar` | `camera` | An RTX lidar (RPLidar S2E, Ouster OS1-32) served as a point-cloud camera. |
 | `viam-labs:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
 | `viam-labs:isaac-sim:motor` | `motor` | A thruster that pushes a rigid body (a floating prop, say); two of them steer by differential thrust. |
 | `viam-labs:isaac-sim:movement_sensor` | `movement_sensor` | GPS, IMU and compass readings from a rigid body. |
@@ -357,6 +358,47 @@ placed with `target` or legacy `orientation_*` / `local_orientation_rpy_deg`
 attributes have a look-at or legacy rotation Viam's frame system doesn't know
 about, so both `obstacles_depth` and `obstacles_pointcloud` will place their
 obstacles rotated. Orient such cameras with the standard frame instead.
+
+### lidar attributes
+
+`world` and `sensor` are required. `sensor` is a preset:
+
+| `sensor` | type | native rate |
+|---|---|---|
+| `rplidar_s2e` | 2D (planar) | 10 Hz |
+| `ouster_os1_32` | 3D, 32 beams | 10 Hz |
+| `robosense_vega` | stand-in for the Dexmate Vega's RoboSense; currently the OS1-32 | 10 Hz |
+
+`get_point_cloud` returns a PCD of the latest scan in meters in the lidar frame
+(axes X forward, Z up, not the camera optical axes); there are no images.
+`min_range_m` / `max_range_m` drop returns outside that range. `rate_hz` is a
+publish rate by decimation: scans land on rendered frames, so it is "at most"
+the requested rate (and at most the world's render rate, `1 / rendering_dt`; the
+module logs a warning when `rate_hz` is higher), and it cannot exceed the
+preset's native rate (rejected at validation). Place it with the standard `frame`. With `parent_prim` the lidar
+moves with that prim and the frame is relative to it, so `frame.parent` must be
+the component the prim belongs to, not `world` (rejected).
+
+| change | takes effect |
+|---|---|
+| `sensor`, `parent_prim` | restart the module |
+| `frame`, `min_range_m`, `max_range_m`, `rate_hz` | live |
+
+```json
+{
+  "name": "base-lidar",
+  "model": "viam-labs:isaac-sim:lidar",
+  "type": "camera",
+  "frame": { "parent": "my-jetbot", "translation": { "x": 0, "y": 0, "z": 150 } },
+  "attributes": {
+    "world": "sim-world",
+    "sensor": "rplidar_s2e",
+    "parent_prim": "/World/my_jetbot/chassis",
+    "max_range_m": 12,
+    "rate_hz": 5
+  }
+}
+```
 
 ### Policy execution
 
@@ -879,5 +921,7 @@ python3 -m venv .venv
 - [x] serve kinematics files (`GetKinematics`) so Viam's motion service can do
       IK and planning for simulated arms (all motion stays in Viam, not Isaac)
 - [x] depth / point clouds from cameras
+- [x] RTX lidar (RPLidar S2E, Ouster OS1-32)
+- [ ] exact RoboSense lidar profile (Dexmate Vega)
 - [x] floating props (buoyancy + drag), thruster motors, GPS/IMU movement sensor, water
 - [x] UR-mounted Robotiq 2F-85 gripper support

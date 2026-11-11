@@ -23,7 +23,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from viam.logging import getLogger
 
@@ -35,6 +35,9 @@ from .bodies import (
     MovementSensorHandle,
     MovementSensorSpec,
 )
+
+if TYPE_CHECKING:
+    from .lidar import LidarHandle
 
 LOGGER = getLogger("viam-isaac-sim")
 
@@ -537,6 +540,9 @@ class SimManager:
         self.world: Any = None
         self._isaac: Any = None  # lazily-populated namespace of isaac imports
         self._step_callbacks: dict[str, Callable[[float], None]] = {}
+        # run after each rendered frame (e.g. lidar scan polling); physics
+        # step callbacks fire per substep, which is too often for sensors
+        self._render_callbacks: dict[str, Callable[[], None]] = {}
         self._mock_sim_time_s = 0.0
         # component name -> (spawn attrs, handle). viam-server rebuilds
         # resources on config change, but prims can't be re-spawned without
@@ -657,6 +663,11 @@ class SimManager:
                 # One rendered frame plus rendering_dt / physics_dt physics
                 # substeps; physics callbacks fire once per substep.
                 self.world.step(render=True)
+                for render_cb in list(self._render_callbacks.values()):
+                    try:
+                        render_cb()
+                    except Exception:
+                        LOGGER.exception("render callback failed")
                 if self._capture_after_render_active:
                     self._capture_after_render()
 
@@ -2620,6 +2631,79 @@ class SimManager:
             cam.add_distance_to_image_plane_to_frame()
         _apply_camera_configuration(cam, attrs)
         return IsaacCameraHandle(self, cam)
+
+    _LIDAR_MUTABLE_KEYS = frozenset(
+        {"position", "orientation_wxyz", "local_position", "local_orientation_wxyz", "rate_hz"}
+    )
+
+    def create_lidar(self, name: str, attrs: dict[str, Any]) -> "LidarHandle":
+        from .lidar import MockLidarHandle, effective_rate
+
+        self._require_booted()
+        existing = self._handles.get(name)
+        if existing is not None:
+            old_attrs, handle = existing
+            changed = {
+                key
+                for key in set(old_attrs) | set(attrs)
+                if key not in self._RUNTIME_KEYS and old_attrs.get(key) != attrs.get(key)
+            }
+            if not changed:
+                return handle
+            restart_required = changed - self._LIDAR_MUTABLE_KEYS
+            if restart_required:
+                raise ValueError(
+                    f"lidar {name!r} requires a module restart to change: "
+                    + ", ".join(sorted(restart_required))
+                )
+            effective_rate(attrs)  # fail before touching the sim
+            # no episode-capture guard (unlike cameras): lidars aren't captured
+            self.run(lambda: handle.reconfigure(attrs), timeout=120.0)
+            self._handles[name] = (dict(attrs), handle)
+            return handle
+        rate = effective_rate(attrs)
+        render_hz = 1.0 / self.cfg.resolved_rendering_dt() if self.cfg else None
+        if render_hz and rate > render_hz + 1e-6:
+            # scans are read once per rendered frame
+            LOGGER.warning(
+                "lidar %s: rate_hz %g exceeds the world's render rate %g Hz "
+                "(1 / rendering_dt); scans arrive at %g Hz",
+                name, rate, render_hz, render_hz,
+            )
+        if self.mock:
+            handle = MockLidarHandle(self, attrs)
+        else:
+            handle = self.run(lambda: self._create_lidar_isaac(name, attrs), timeout=120.0)
+        self._handles[name] = (dict(attrs), handle)
+        return handle
+
+    def _create_lidar_isaac(self, name: str, attrs: dict[str, Any]) -> "LidarHandle":
+        from .lidar import IsaacLidarHandle
+
+        parent = attrs.get("parent_prim")
+        if parent:
+            self._require_prim(parent)
+            prim_path = f"{parent.rstrip('/')}/{_prim_name(name)}"
+        else:
+            prim_path = f"/World/{_prim_name(name)}"
+        handle = IsaacLidarHandle(self, name, prim_path, attrs)
+        self._render_callbacks[f"lidar:{name}"] = lambda: handle.poll(
+            float(self.world.current_time)
+        )
+        return handle
+
+    def remove_lidar(self, name: str) -> None:
+        """Tear down a closed lidar so a rename or re-add with new settings
+        builds a fresh sensor instead of being refused."""
+        entry = self._handles.pop(name, None)
+        if entry is None or self.mock:
+            return
+
+        def _close() -> None:
+            self._render_callbacks.pop(f"lidar:{name}", None)
+            entry[1].close()
+
+        self.run(_close, timeout=60.0)
 
     def _require_prim(self, prim_path: str) -> None:
         """Raise a helpful error if prim_path doesn't exist in the stage."""
