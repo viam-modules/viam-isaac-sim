@@ -4,6 +4,8 @@ import pytest
 
 from isaac_module.spatial import (
     look_at_quat,
+    orbit_to_position,
+    position_to_orbit,
     ov_to_quat,
     pose_in_frame,
     quat_from_axis_angle,
@@ -117,3 +119,36 @@ def test_look_at_straight_down():
     q = look_at_quat((0.0, 0.0, 5.0), (0.0, 0.0, 0.0))
     fwd = quat_rotate(q, (1.0, 0.0, 0.0))
     assert fwd[2] == pytest.approx(-1.0, abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    "yaw, pitch",
+    [(0.0, 0.0), (90.0, 0.0), (-135.0, 30.0), (45.0, -60.0), (179.0, 89.0)],
+)
+def test_orbit_round_trip(yaw, pitch):
+    target = (0.5, -0.25, 0.75)
+    position = orbit_to_position(target, 2.0, yaw, pitch)
+    distance, yaw_out, pitch_out = position_to_orbit(position, target)
+    assert distance == pytest.approx(2.0)
+    assert yaw_out == pytest.approx(yaw, abs=1e-9)
+    assert pitch_out == pytest.approx(pitch, abs=1e-9)
+
+
+def test_orbit_axes_are_z_up_yaw_from_x():
+    assert orbit_to_position((0, 0, 0), 3.0, 0.0, 0.0) == pytest.approx((3.0, 0.0, 0.0))
+    assert orbit_to_position((0, 0, 0), 3.0, 90.0, 0.0) == pytest.approx((0.0, 3.0, 0.0), abs=1e-12)
+    assert orbit_to_position((0, 0, 1), 2.0, 0.0, 90.0) == pytest.approx((0.0, 0.0, 3.0), abs=1e-12)
+
+
+def test_look_at_from_orbit_points_at_target():
+    target = (0.2, 0.1, 0.5)
+    position = orbit_to_position(target, 1.5, 30.0, 20.0)
+    forward = quat_rotate(look_at_quat(position, target), (1.0, 0.0, 0.0))
+    expected = [t - p for t, p in zip(target, position)]
+    norm = math.sqrt(sum(v * v for v in expected))
+    assert forward == pytest.approx(tuple(v / norm for v in expected), abs=1e-9)
+
+
+def test_position_to_orbit_rejects_coincident_points():
+    with pytest.raises(ValueError, match="must differ"):
+        position_to_orbit((1.0, 1.0, 1.0), (1.0, 1.0, 1.0))

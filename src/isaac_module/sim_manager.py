@@ -684,6 +684,11 @@ class SimManager:
                 except BaseException as e:
                     fut.set_exception(e)
 
+    @property
+    def episode_active(self) -> bool:
+        """True while an episode capture is recording."""
+        return self._episode_id is not None
+
     def run(self, fn: Callable[[], Any], timeout: float = 30.0) -> Any:
         """Run fn on the sim thread and return its result."""
         if threading.get_ident() == self._sim_thread_id:

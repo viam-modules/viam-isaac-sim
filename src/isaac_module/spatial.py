@@ -167,6 +167,36 @@ def look_at_quat(position: Vec3, target: Vec3) -> Quat:
     return quat_mul(qz, qy)
 
 
+def orbit_to_position(
+    target: Sequence[float], distance: float, yaw_deg: float, pitch_deg: float
+) -> Vec3:
+    """Camera position on a sphere around target. Z-up; yaw is measured
+    about +Z from +X; pitch is elevation above the XY plane."""
+    yaw = math.radians(yaw_deg)
+    pitch = math.radians(pitch_deg)
+    horizontal = distance * math.cos(pitch)
+    return (
+        float(target[0]) + horizontal * math.cos(yaw),
+        float(target[1]) + horizontal * math.sin(yaw),
+        float(target[2]) + distance * math.sin(pitch),
+    )
+
+
+def position_to_orbit(
+    position: Sequence[float], target: Sequence[float]
+) -> Tuple[float, float, float]:
+    """Inverse of orbit_to_position: (distance, yaw_deg, pitch_deg)."""
+    dx = float(position[0]) - float(target[0])
+    dy = float(position[1]) - float(target[1])
+    dz = float(position[2]) - float(target[2])
+    distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if distance == 0.0:
+        raise ValueError("camera position and target must differ")
+    yaw = math.degrees(math.atan2(dy, dx))
+    pitch = math.degrees(math.asin(max(-1.0, min(1.0, dz / distance))))
+    return distance, yaw, pitch
+
+
 def to_vec3(value: Sequence[float], default: Vec3 = (0.0, 0.0, 0.0)) -> Vec3:
     if value is None:
         return default
