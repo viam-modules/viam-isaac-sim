@@ -143,6 +143,7 @@ def test_integrated_lite6_gripper_authors_compound_collisions(
     arm.refresh_dofs = lambda: initialization_events.append(("refresh",))
 
     manager = object.__new__(SimManager)
+    manager._handles = {}
     created = {}
     cubes = {}
     collision_applications = []

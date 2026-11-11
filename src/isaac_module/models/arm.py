@@ -11,8 +11,10 @@ Attributes:
                                      known assets provide a default when available
   arm_model (string)               - optional episode manifest label for a custom USD
   move_timeout_sec (float)         - max time to wait for a move (default 30)
-  max_joint_deg_s (float)          - optional positive per-joint velocity limit passed
-                                     to the Isaac articulation
+  max_joint_deg_s (float)          - optional positive per-joint velocity limit: latched
+                                     joint targets ramp at this speed, and it is the
+                                     velocity limit reported to trajectory
+                                     parameterizers
   max_joint_deg_s2 (float)         - optional positive per-joint acceleration limit
                                      reported for trajectory parameterization
   is_moving_velocity_threshold_rad_s (float) - velocity above which IsMoving
@@ -26,7 +28,9 @@ Attributes:
                                      targets; sparse waypoint pairs are
                                      linearly interpolated so drives can
                                      actually track them (default 2.0,
-                                     range (0, 30])
+                                     range (0, 30]); when max_joint_deg_s is
+                                     set, capped at max_joint_deg_s /
+                                     robot_control_freq_hz
   kinematics_url (string)          - where to fetch the kinematics file served
                                      by GetKinematics (.json = SVA, .urdf =
                                      URDF; file:// URLs work). Known assets with
@@ -236,10 +240,15 @@ class IsaacArm(Arm, EasyResource):
             )
         self._max_step_rad = math.radians(step_deg)
         self._attrs = attrs
+        max_joint_deg_s = _max_joint_deg_s(attrs, config.name)
+        if max_joint_deg_s is not None:
+            # Don't stream targets faster than the handle ramps them.
+            self._max_step_rad = min(
+                self._max_step_rad, math.radians(max_joint_deg_s) * self._control_period
+            )
         attrs["is_moving_velocity_threshold_rad_s"] = (
             _is_moving_velocity_threshold(attrs, config.name)
         )
-        max_joint_deg_s = _max_joint_deg_s(attrs, config.name)
         if max_joint_deg_s is not None:
             attrs["max_joint_deg_s"] = max_joint_deg_s
         max_joint_deg_s2 = _max_joint_deg_s2(attrs, config.name)
