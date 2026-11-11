@@ -353,9 +353,66 @@ def test_arm_set_joint_targets_radians_is_immediate_and_validated(world):
         assert not await arm.is_moving()
         assert arm._h().is_moving()
         await arm.stop()
-        with pytest.raises(ValueError, match="six values"):
+        with pytest.raises(ValueError, match="requires 6 values"):
             await arm.do_command(
                 {"command": "set_joint_targets_radians", "values": [0.0]}
+            )
+
+    asyncio.run(scenario())
+
+
+def test_mock_arms_share_a_prim_with_joint_subsets(world):
+    from viam.components.arm import JointPositions
+
+    torso_joints = ["torso_j1", "torso_j2", "torso_j3"]
+    left_joints = [f"L_arm_j{i}" for i in range(1, 8)]
+    torso = IsaacArm.new(
+        _config(
+            "vega-torso",
+            {
+                "world": "sim-world",
+                "usd_path": "/robots/vega.usd",
+                "prim_path": "/World/vega",
+                "joint_names": torso_joints,
+            },
+        ),
+        {},
+    )
+    left = IsaacArm.new(
+        _config(
+            "vega-left",
+            {
+                "world": "sim-world",
+                "prim_path": "/World/vega",
+                "joint_names": left_joints,
+            },
+        ),
+        {},
+    )
+
+    async def scenario():
+        assert left._h().joint_names() == tuple(left_joints)
+        metadata = await left.do_command({"command": "policy_metadata"})
+        assert metadata["joint_names"] == left_joints
+        target = [5, -10, 15, -20, 25, -30, 35]
+        await left.move_to_joint_positions(JointPositions(values=target))
+        assert (await left.get_joint_positions()).values == pytest.approx(
+            target, abs=0.5
+        )
+        assert (await torso.get_joint_positions()).values == pytest.approx([0.0] * 3)
+
+        await torso.do_command(
+            {"command": "set_joint_targets_radians", "values": [0.1, 0.0, -0.1]}
+        )
+        await asyncio.sleep(0.2)
+        radians = await torso.do_command({"command": "get_joint_positions_radians"})
+        assert radians["values"] == pytest.approx([0.1, 0.0, -0.1])
+        assert (await left.get_joint_positions()).values == pytest.approx(
+            target, abs=0.5
+        )
+        with pytest.raises(ValueError, match="requires 3 values"):
+            await torso.do_command(
+                {"command": "set_joint_targets_radians", "values": [0.0] * 6}
             )
 
     asyncio.run(scenario())
@@ -527,3 +584,15 @@ def test_capture_after_render_samples_once_per_capture_period():
 def test_status_settings_are_simconfig_fields():
     names = {f.name for f in dataclasses.fields(SimConfig)}
     assert set(_STATUS_SETTINGS) <= names
+
+
+def test_closing_an_arm_stops_it(world):
+    arm = IsaacArm.new(_config("closing-arm", {"world": "sim-world"}), {})
+    handle = arm._h()
+    stopped = []
+    handle.stop = lambda: stopped.append(True)
+
+    asyncio.run(arm.close())
+
+    assert stopped == [True]
+    assert "closing-arm" not in SimManager.get()._handles

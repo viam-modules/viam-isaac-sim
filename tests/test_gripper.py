@@ -303,6 +303,8 @@ def test_integrated_lite6_gripper_authors_compound_collisions(
         ),
     }
     manager._prop_specs = {"pick_block": {}}
+    manager._shared_bases = []
+    manager._handles = {"pick_arm": ({}, arm)}
     manager.cfg = SimpleNamespace(physics_dt=0.02)
     manager._isaac = SimpleNamespace(
         get_prim_at_path=lambda path: prims.get(path),

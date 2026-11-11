@@ -10,6 +10,10 @@ Attributes:
   end_effector_prim (string)       - prim path whose world pose GetEndPosition reports;
                                      known assets provide a default when available
   arm_model (string)               - optional episode manifest label for a custom USD
+  joint_names ([string])           - articulation DOFs this arm drives, in order;
+                                     overrides the known asset's joints (default:
+                                     all DOFs). Lets several arms share one
+                                     prim_path, each owning a joint subset.
   move_timeout_sec (float)         - max time to wait for a move (default 30)
   max_joint_deg_s (float)          - optional positive per-joint velocity limit: latched
                                      joint targets ramp at this speed, and it is the
@@ -165,6 +169,25 @@ def _initial_joint_positions_deg(
     return [float(value) for value in raw]
 
 
+def _joint_names(
+    attrs: Mapping[str, Any], component_name: str
+) -> list[str] | None:
+    raw = attrs.get("joint_names")
+    if raw is None:
+        return None
+    if (
+        not isinstance(raw, (list, tuple))
+        or not raw
+        or not all(isinstance(name, str) and name for name in raw)
+    ):
+        raise ValueError(
+            f"{component_name}: joint_names must be a non-empty list of strings"
+        )
+    if len(set(raw)) != len(raw):
+        raise ValueError(f"{component_name}: joint_names must be unique")
+    return list(raw)
+
+
 def _is_moving_velocity_threshold(
     attrs: Mapping[str, Any], component_name: str
 ) -> float:
@@ -217,6 +240,7 @@ class IsaacArm(Arm, EasyResource):
         _max_joint_deg_s(attrs, config.name)
         _max_joint_deg_s2(attrs, config.name)
         _initial_joint_positions_deg(attrs, config.name)
+        _joint_names(attrs, config.name)
         return result
 
     def reconfigure(
@@ -259,6 +283,17 @@ class IsaacArm(Arm, EasyResource):
             attrs["initial_joint_positions_deg"] = initial_joint_positions_deg
         self._handle = SimManager.get().create_arm(self.name, attrs)
 
+    async def close(self) -> None:
+        """viam-server removed or renamed this arm: stop it, drop its cached
+        handle and its claim on a shared articulation's USD."""
+        handle, self._handle = self._handle, None
+        try:
+            if handle is not None:
+                # else its trajectory callback keeps writing the shared joints
+                await asyncio.to_thread(handle.stop)
+        finally:
+            SimManager.get().remove_arm(self.name)
+
     def _h(self) -> ArmHandle:
         if self._handle is None:
             raise RuntimeError(f"arm {self.name} is not attached to the sim")
@@ -267,11 +302,11 @@ class IsaacArm(Arm, EasyResource):
     def policy_metadata(self) -> Mapping[str, Any]:
         """Return the simulator embodiment identity used by policy validation."""
         model = str(self._attrs.get("asset", self._attrs.get("arm_model", "")))
-        meta = KNOWN_ASSETS.get(model, {})
         return {
             "simulation": True,
             "arm_model": model,
-            "joint_names": list(meta.get("joint_names", ())),
+            # what the handle drives: a joint_names change needs a restart
+            "joint_names": list(self._h().joint_names()),
         }
 
     async def get_end_position(self, **kwargs) -> Pose:
@@ -560,8 +595,9 @@ class IsaacArm(Arm, EasyResource):
             return await asyncio.to_thread(self._h().dynamics_metadata)
         if cmd == "set_joint_targets_radians":
             raw = command.get("values")
-            if not isinstance(raw, (list, tuple)) or len(raw) != 6:
-                raise ValueError("set_joint_targets_radians requires six values")
+            dof = len(self._h().joint_names())
+            if not isinstance(raw, (list, tuple)) or len(raw) != dof:
+                raise ValueError(f"set_joint_targets_radians requires {dof} values")
             targets = [float(value) for value in cast(Any, raw)]
             if not all(math.isfinite(value) for value in targets):
                 raise ValueError("set_joint_targets_radians values must be finite")

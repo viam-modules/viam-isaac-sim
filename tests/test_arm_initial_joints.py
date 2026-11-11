@@ -141,6 +141,9 @@ def _spawn(monkeypatch, attrs):
     kwargs the arm handle was built with."""
     calls = {}
     manager = object.__new__(SimManager)
+    manager._arm_articulations = {}
+    manager._arm_usd_owners = {}
+    manager._shared_bases = []
     manager._resolve_usd = lambda a: ("/fake/arm.usd", KNOWN_ASSETS.get(a.get("asset"), {}))
     manager._require_prim = lambda path: None
     manager._isaac = SimpleNamespace(
@@ -184,7 +187,7 @@ def test_spawn_without_an_initial_pose_is_unchanged(monkeypatch):
 
 
 def test_initial_pose_needs_known_joint_names(monkeypatch):
-    with pytest.raises(ValueError, match="known asset"):
+    with pytest.raises(ValueError, match="joint_names or a known asset"):
         _spawn(monkeypatch, {"initial_joint_positions_deg": HOME_DEG})
 
 
