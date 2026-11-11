@@ -195,6 +195,31 @@ def test_movement_sensor_spec_rejects_negative_noise():
         MovementSensorSpec.from_attrs({"position_noise_m": -1})
 
 
+def test_movement_sensor_base_velocity_frame():
+    """Wheel-odometry consumers (e.g. nav-stack SLAM) need body-frame twist."""
+    from isaac_module.bodies import BodyState, MovementSensorHandle
+
+    heading_north = BodyState(
+        position=(0.0, 0.0, 0.0),
+        orientation_wxyz=quat_from_yaw(math.pi / 2),
+        linear_velocity=(0.0, 0.5, 0.0),  # driving forward (+X body) = north
+        angular_velocity=(0.0, 0.0, 0.0),
+        linear_acceleration=(0.0, 0.0, 0.0),
+        sim_time_s=0.0,
+    )
+    body = SimpleNamespace(get_state=lambda: heading_north)
+    world = MovementSensorHandle(body, MovementSensorSpec.from_attrs({})).readings()
+    assert world["linear_velocity"]["y"] == pytest.approx(0.5)
+    base = MovementSensorHandle(
+        body, MovementSensorSpec.from_attrs({"velocity_frame": "base"})
+    ).readings()
+    # Viam base axes: +Y forward, +X right
+    assert base["linear_velocity"]["y"] == pytest.approx(0.5)
+    assert base["linear_velocity"]["x"] == pytest.approx(0.0, abs=1e-9)
+    with pytest.raises(ValueError, match="velocity_frame"):
+        MovementSensorSpec.from_attrs({"velocity_frame": "body"})
+
+
 # ----------------------------------------------------------------------
 # Mock end-to-end: world with a floating prop -> thrusters -> movement sensor
 # ----------------------------------------------------------------------

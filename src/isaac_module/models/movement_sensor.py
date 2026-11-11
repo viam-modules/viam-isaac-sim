@@ -14,11 +14,16 @@ Attributes:
   velocity_noise_mps (float)   - gaussian noise on linear velocity, default 0
   include_gravity (bool)       - IMU-style specific force (reads +9.81 on z at
                                  rest), default true; false for pure motion
+  velocity_frame (string)      - "world" (default) or "base" (Viam base axes,
+                                 +Y forward and +X right, taking body +X as
+                                 forward), as wheel odometry consumers such
+                                 as nav-stack SLAM expect
   seed (int)                   - fix the noise stream for reproducible runs
 
 Readings:
   GetPosition           lat/lon from the origin; altitude is the body's z
-  GetLinearVelocity     world frame (x east, y north, z up), m/s
+  GetLinearVelocity     world frame (x east, y north, z up), m/s; or the
+                        base frame with velocity_frame "base"
   GetAngularVelocity    body frame (roll, pitch, yaw rates), deg/s
   GetLinearAcceleration body frame, m/s^2
   GetCompassHeading     bearing of the body's +X axis, degrees clockwise from north
