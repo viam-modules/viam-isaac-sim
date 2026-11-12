@@ -780,3 +780,60 @@ def test_belt_add_rejects_a_position_off_the_belt(belt):
     _belt(belt, {"command": "set_belt", **BELT, "speed_mps": 0.0})
     with pytest.raises(ValueError, match="at_m"):
         _belt(belt, {"command": "belt_add", "prop": "belt_a", "at_m": 1.5})
+
+
+class _FakeRigidPrim:
+    """Records batched writes; lists its prims in reverse so a caller must
+    map props to view indices rather than assume config order."""
+
+    def __init__(self, prim_paths_expr, name):
+        self.prim_paths = list(reversed(prim_paths_expr))
+        self.poses = {}
+        self.velocities = {}
+        self.writes = 0
+
+    def initialize(self):
+        pass
+
+    def set_world_poses(self, positions, orientations, indices):
+        self.writes += 1
+        for i, p, o in zip(indices, positions, orientations):
+            self.poses[self.prim_paths[int(i)]] = (list(p), list(o))
+
+    def set_velocities(self, velocities, indices):
+        for i, v in zip(indices, velocities):
+            self.velocities[self.prim_paths[int(i)]] = list(v)
+
+
+def test_isaac_belt_moves_cube_props_in_one_batched_write():
+    from isaac_module.belt import Belt
+
+    manager = SimManager()
+    manager._register_props(
+        [
+            {"name": "table", "type": "cube", "fixed": True},
+            {"name": "a", "type": "cube"},
+            {"name": "b", "type": "cube"},
+        ]
+    )
+    views = []
+
+    def rigid_prim(prim_paths_expr, name):
+        views.append(_FakeRigidPrim(prim_paths_expr, name))
+        return views[-1]
+
+    manager._isaac = SimpleNamespace(RigidPrim=rigid_prim)
+    manager.world = SimpleNamespace(scene=SimpleNamespace(add=lambda view: view))
+    manager._belt = Belt((0.0, 0.0, 0.1), (1.0, 0.0, 0.1), 1.0, wrap=True)
+    manager._belt.load(["a", "b"], 0.5)
+
+    manager._advance_belt(0.25)
+    manager._advance_belt(0.25)
+
+    (view,) = views
+    assert sorted(view.prim_paths) == ["/World/a", "/World/b"]
+    assert view.writes == 2
+    assert view.poses["/World/a"][0] == pytest.approx([0.5, 0.0, 0.1])
+    assert view.poses["/World/b"][0] == pytest.approx([0.0, 0.0, 0.1])
+    assert view.poses["/World/a"][1] == pytest.approx([1.0, 0.0, 0.0, 0.0])
+    assert view.velocities["/World/a"] == [0.0] * 6

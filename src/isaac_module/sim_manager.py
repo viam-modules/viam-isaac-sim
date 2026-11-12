@@ -984,6 +984,9 @@ class SimManager:
         # sim thread only: the kinematic belt and the orientation it holds props at
         self._belt: Belt | None = None
         self._belt_orientation: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
+        # one RigidPrim view over every dynamic cube prop and its index by
+        # prop name, so a belt step is one batched write; False if unavailable
+        self._belt_view: Any = None
         # rigid bodies that motors push and movement sensors read, keyed by
         # prop name and by prim path
         self._bodies: dict[str, BodyHandle] = {}
@@ -2551,9 +2554,50 @@ class SimManager:
             "props": dict(belt.props),
         }
 
+    def _belt_cube_view(self) -> tuple[Any, dict[str, int]] | None:
+        if self._belt_view is None:
+            paths = [
+                f"/World/{name}"
+                for name, spec in self._prop_specs.items()
+                if spec.get("type", "cube") == "cube" and not spec.get("fixed")
+            ]
+            try:
+                view = self._isaac.RigidPrim(prim_paths_expr=paths, name="belt_props")
+                self.world.scene.add(view)
+                view.initialize()
+                index = {
+                    path.rsplit("/", 1)[-1]: i for i, path in enumerate(view.prim_paths)
+                }
+                self._belt_view = (view, index)
+            except Exception:
+                LOGGER.exception("cannot batch belt props; moving them one at a time")
+                self._belt_view = False
+        return self._belt_view or None
+
     def _place_on_belt(self, placed: Mapping[str, tuple[float, float, float]]) -> None:
+        cubes = None if self.mock or not placed else self._belt_cube_view()
+        batched = []
+        if cubes is not None:
+            # props a motor or movement sensor tracks go one at a time, so
+            # their bodies drop the teleport from their velocity history
+            batched = [n for n in placed if n in cubes[1] and n not in self._bodies]
         for name, position in placed.items():
-            self._set_prop_pose(name, position, self._belt_orientation)
+            if name not in batched:
+                self._set_prop_pose(name, position, self._belt_orientation)
+        if not batched:
+            return
+        import numpy as np
+
+        view, index = cubes
+        indices = np.array([index[n] for n in batched], dtype=np.int32)
+        view.set_world_poses(
+            positions=np.array([placed[n] for n in batched], dtype=np.float32),
+            orientations=np.array(
+                [self._belt_orientation] * len(batched), dtype=np.float32
+            ),
+            indices=indices,
+        )
+        view.set_velocities(np.zeros((len(batched), 6), dtype=np.float32), indices=indices)
 
     def _advance_belt(self, dt: float) -> None:
         if self._belt is None:
