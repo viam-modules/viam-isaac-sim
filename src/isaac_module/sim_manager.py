@@ -37,6 +37,13 @@ from .bodies import (
     MovementSensorHandle,
     MovementSensorSpec,
 )
+from .world_state import (
+    MAX_MESH_BYTES,
+    Collider,
+    Obstacle,
+    parse_collider,
+    ply_bytes,
+)
 
 if TYPE_CHECKING:
     from .lidar import LidarHandle
@@ -980,6 +987,14 @@ class SimManager:
         self._shared_bases: list[tuple[Any, str, tuple[str, ...]]] = []
         self._prop_specs: dict[str, dict[str, Any]] = {}
         self._mock_prop_poses: dict[str, dict[str, Any]] = {}
+        # prims added with add_usd, by obstacle name: {"prim_path", "position",
+        # "world_state", "collider"}
+        self._added_usd: dict[str, dict[str, Any]] = {}
+        # what each prop publishes to a world state store, computed on first
+        # use: obstacle name -> Collider (None: none could be worked out) and
+        # obstacle name -> PLY bytes (None: no usable mesh)
+        self._obstacle_colliders: dict[str, Collider | None] = {}
+        self._obstacle_meshes: dict[str, bytes | None] = {}
         # rigid bodies that motors push and movement sensors read, keyed by
         # prop name and by prim path
         self._bodies: dict[str, BodyHandle] = {}
@@ -1040,6 +1055,12 @@ class SimManager:
             if prop.get("mass") is not None and float(prop["mass"]) <= 0.0:
                 raise ValueError(f"prop {name}: mass must be positive")
             BuoyancySpec.from_prop(prop, self.cfg.water_level_m() if self.cfg else 0.0)
+            # toggler props mirror geometry that is already in the frame system
+            prop["world_state"] = bool(
+                prop.get("world_state", not prop.get("from_toggler", False))
+            )
+            if prop.get("collider") is not None:
+                parse_collider(prop["collider"], f"prop {name}")
             position = _vector3(prop.get("position", (0.0, 0.0, 0.0)), "position")
             orientation = _quaternion(
                 prop.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0)),
@@ -2534,17 +2555,254 @@ class SimManager:
         usd_path: str,
         prim_path: str,
         position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        world_state: bool = True,
+        collider: Any = None,
     ) -> None:
         self._require_booted()
-        if self.mock:
-            return
+        name = _prim_name(prim_path.rstrip("/").rsplit("/", 1)[-1])
+        if name in self._prop_specs or (
+            name in self._added_usd and self._added_usd[name]["prim_path"] != prim_path
+        ):
+            name = _body_key(prim_path)
+        if collider is not None:
+            parse_collider(collider, f"add_usd {prim_path}")
+        entry = {
+            "prim_path": prim_path,
+            "position": _vector3(position, "position"),
+            "world_state": bool(world_state),
+            "collider": collider,
+        }
 
         def _add():
-            self._isaac.add_reference_to_stage(usd_path=usd_path, prim_path=prim_path)
-            prim = self._isaac.SingleXFormPrim(prim_path)
-            prim.set_world_pose(position=list(position))
+            if not self.mock:
+                self._isaac.add_reference_to_stage(
+                    usd_path=usd_path, prim_path=prim_path
+                )
+                prim = self._isaac.SingleXFormPrim(prim_path)
+                prim.set_world_pose(position=list(position))
+            # registered on the sim thread, which is also where it is read
+            self._added_usd[name] = entry
+            self._obstacle_colliders.pop(name, None)
+            self._obstacle_meshes.pop(name, None)
 
         self.run(_add, timeout=60.0)
+
+    # ------------------------------------------------------------------
+    # world state store obstacles
+    # ------------------------------------------------------------------
+
+    def world_state_obstacles(self, include_meshes: bool = False) -> list[Obstacle]:
+        """Every prop and add_usd prim flagged for the world state store, with
+        its current pose. One hop to the sim thread for all of them."""
+        self._require_booted()
+
+        def read() -> list[Obstacle]:
+            sources: list[tuple[str, str, dict[str, Any]]] = [
+                (name, f"/World/{name}", spec)
+                for name, spec in self._prop_specs.items()
+            ]
+            sources += [
+                (name, entry["prim_path"], entry)
+                for name, entry in self._added_usd.items()
+            ]
+            obstacles: list[Obstacle] = []
+            for name, prim_path, spec in sources:
+                if not spec.get("world_state", True):
+                    continue
+                collider = self._obstacle_collider(name, prim_path, spec)
+                if collider is None:
+                    continue
+                position, orientation = self._obstacle_pose(name, prim_path)
+                color = spec.get("color")
+                obstacles.append(
+                    Obstacle(
+                        name=name,
+                        position=position,
+                        orientation_wxyz=orientation,
+                        collider=collider,
+                        color=(
+                            (float(color[0]), float(color[1]), float(color[2]))
+                            if color is not None
+                            else None
+                        ),
+                        mesh_ply=(
+                            self._obstacle_mesh(name, prim_path, spec)
+                            if include_meshes
+                            else None
+                        ),
+                    )
+                )
+            return obstacles
+
+        return self.run(read)
+
+    def _obstacle_pose(
+        self, name: str, prim_path: str
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+        """Sim thread only: where a prop or add_usd prim is right now."""
+        if self.mock:
+            if name in self._added_usd:
+                return self._added_usd[name]["position"], (1.0, 0.0, 0.0, 0.0)
+            body = self._bodies.get(name)
+            if body is not None:
+                state = body.get_state()
+                return _vector3(state.position, "position"), _quaternion(
+                    state.orientation_wxyz, "orientation_wxyz"
+                )
+            pose = self._mock_prop_poses[name]
+            return _vector3(pose["position"], "position"), _quaternion(
+                pose["orientation_wxyz"], "orientation_wxyz"
+            )
+        scene_object = (
+            self.world.scene.get_object(name) if name in self._prop_specs else None
+        )
+        target = (
+            scene_object
+            if scene_object is not None
+            else self._isaac.SingleXFormPrim(prim_path)
+        )
+        position, orientation = target.get_world_pose()
+        return _vector3(position, "position"), _quaternion(
+            orientation, "orientation_wxyz"
+        )
+
+    def _obstacle_collider(
+        self, name: str, prim_path: str, spec: dict[str, Any]
+    ) -> Collider | None:
+        """Sim thread only: the primitive a prop publishes. A cube prop is its
+        own box; anything else uses its "collider" block, or else a box around
+        the prim's bounds. Worked out once per prop."""
+        if name in self._obstacle_colliders:
+            return self._obstacle_colliders[name]
+        collider: Collider | None = None
+        try:
+            if spec.get("collider") is not None:
+                collider = parse_collider(spec["collider"], name)
+            elif name in self._prop_specs and str(spec.get("type", "cube")) == "cube":
+                size = float(spec.get("size", 0.05))
+                scale = spec.get("scale") or (1.0, 1.0, 1.0)
+                collider = Collider(
+                    "box",
+                    (
+                        size * float(scale[0]),
+                        size * float(scale[1]),
+                        size * float(scale[2]),
+                    ),
+                )
+            elif self.mock:
+                LOGGER.warning(
+                    "%s is not in the world state store: mock mode has no stage "
+                    'to measure it in, so give it a "collider"',
+                    name,
+                )
+            else:
+                collider = self._bounds_collider(prim_path)
+        except Exception:
+            LOGGER.exception("%s is not in the world state store", name)
+        self._obstacle_colliders[name] = collider
+        return collider
+
+    def _prim_frame(self, prim_path: str) -> tuple[Any, Any, Any]:
+        """Sim thread only: a prim, its local-to-world matrix and its world
+        scale. Poses reported for a prim carry no scale, so geometry measured
+        in the prim's own space has to be scaled to match them."""
+        import omni.usd
+        from pxr import Gf, UsdGeom
+
+        prim = omni.usd.get_context().get_stage().GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            raise ValueError(f"no prim at {prim_path}")
+        to_world = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(
+            _usd_default_time()
+        )
+        return prim, to_world, Gf.Transform(to_world).GetScale()
+
+    def _bounds_collider(self, prim_path: str) -> Collider:
+        from pxr import UsdGeom
+
+        prim, _to_world, scale = self._prim_frame(prim_path)
+        cache = UsdGeom.BBoxCache(
+            _usd_default_time(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render]
+        )
+        bounds = cache.ComputeUntransformedBound(prim).ComputeAlignedRange()
+        if bounds.IsEmpty():
+            raise ValueError(f"{prim_path} has no geometry to bound")
+        low, high = bounds.GetMin(), bounds.GetMax()
+        return Collider(
+            "box",
+            tuple(abs(float(scale[i])) * float(high[i] - low[i]) for i in range(3)),
+            (
+                float(scale[0]) * float(low[0] + high[0]) / 2.0,
+                float(scale[1]) * float(low[1] + high[1]) / 2.0,
+                float(scale[2]) * float(low[2] + high[2]) / 2.0,
+            ),
+        )
+
+    def _obstacle_mesh(
+        self, name: str, prim_path: str, spec: dict[str, Any]
+    ) -> bytes | None:
+        """Sim thread only: a prop's meshes as one PLY in the prop's frame, or
+        None. Cube props have none; their box is already exact."""
+        if name in self._obstacle_meshes:
+            return self._obstacle_meshes[name]
+        mesh: bytes | None = None
+        is_cube = name in self._prop_specs and str(spec.get("type", "cube")) == "cube"
+        if not self.mock and not is_cube:
+            try:
+                mesh = self._prim_mesh_ply(prim_path)
+                if mesh is not None and len(mesh) > MAX_MESH_BYTES:
+                    LOGGER.warning(
+                        "%s: mesh is %d bytes, over the %d byte limit; publishing "
+                        "its collider only",
+                        name,
+                        len(mesh),
+                        MAX_MESH_BYTES,
+                    )
+                    mesh = None
+            except Exception:
+                LOGGER.exception("%s: could not read a mesh", name)
+        self._obstacle_meshes[name] = mesh
+        return mesh
+
+    def _prim_mesh_ply(self, prim_path: str) -> bytes | None:
+        from pxr import Gf, Usd, UsdGeom
+
+        root, root_to_world, scale = self._prim_frame(prim_path)
+        world_to_root = root_to_world.GetInverse()
+        vertices: list[tuple[float, float, float]] = []
+        triangles: list[tuple[int, int, int]] = []
+        for prim in _prim_range(Usd, root):
+            if not prim.IsA(UsdGeom.Mesh):
+                continue
+            mesh = UsdGeom.Mesh(prim)
+            points = mesh.GetPointsAttr().Get()
+            counts = mesh.GetFaceVertexCountsAttr().Get()
+            indices = mesh.GetFaceVertexIndicesAttr().Get()
+            if not points or not counts or not indices:
+                continue
+            to_root = (
+                UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(
+                    _usd_default_time()
+                )
+                * world_to_root
+            )
+            base = len(vertices)
+            for point in points:
+                p = to_root.Transform(Gf.Vec3d(*point))
+                vertices.append(
+                    (
+                        float(p[0]) * float(scale[0]),
+                        float(p[1]) * float(scale[1]),
+                        float(p[2]) * float(scale[2]),
+                    )
+                )
+            triangles += [
+                (base + a, base + b, base + c)
+                for a, b, c in fan_triangles(counts, indices)
+            ]
+        if not triangles:
+            return None
+        return ply_bytes(vertices, triangles)
 
     # ------------------------------------------------------------------
     # component factories
@@ -3752,6 +4010,26 @@ def _local_ip() -> str:
             s.close()
     except Exception:
         return ""
+
+
+def _usd_default_time() -> Any:
+    from pxr import Usd
+
+    return Usd.TimeCode.Default()
+
+
+def fan_triangles(
+    counts: Sequence[int], indices: Sequence[int]
+) -> list[tuple[int, int, int]]:
+    """Split USD polygon faces (vertex counts plus a flat index list) into
+    triangles, fanning each face out from its first vertex."""
+    triangles: list[tuple[int, int, int]] = []
+    start = 0
+    for count in counts:
+        face = [int(i) for i in indices[start : start + count]]
+        start += count
+        triangles += [(face[0], face[i], face[i + 1]) for i in range(1, len(face) - 1)]
+    return triangles
 
 
 def _prim_name(name: str) -> str:
