@@ -782,6 +782,79 @@ def test_belt_add_rejects_a_position_off_the_belt(belt):
         _belt(belt, {"command": "belt_add", "prop": "belt_a", "at_m": 1.5})
 
 
+OUT = {"start": [0.0, 2.0, 0.05], "end": [1.0, 2.0, 0.05]}
+
+
+@pytest.fixture
+def belts(world):
+    yield world
+    for name in ("default", "in", "out"):
+        _belt(world, {"command": "stop_belt", "belt": name})
+
+
+def test_named_belts_run_at_once(belts, sim):
+    _belt(belts, {"command": "set_belt", "belt": "in", **BELT, "speed_mps": 0.5, "props": ["belt_a"]})
+    _belt(belts, {"command": "set_belt", "belt": "out", **OUT, "speed_mps": 0.5, "props": ["belt_b"]})
+    _, a0 = _pose_at(sim, "belt_a")
+    _, b0 = _pose_at(sim, "belt_b")
+
+    time.sleep(0.2)
+
+    _, a1 = _pose_at(sim, "belt_a")
+    _, b1 = _pose_at(sim, "belt_b")
+    assert a1[0] > a0[0] and a1[1] == pytest.approx(1.0)
+    assert b1[0] > b0[0] and b1[1] == pytest.approx(2.0)
+    assert set(_belt(belts, {"command": "get_belt", "belt": "out"})["props"]) == {"belt_b"}
+
+
+def test_stop_belt_stops_only_the_named_belt(belts, sim):
+    _belt(belts, {"command": "set_belt", "belt": "in", **BELT, "speed_mps": 0.5, "props": ["belt_a"]})
+    _belt(belts, {"command": "set_belt", "belt": "out", **OUT, "speed_mps": 0.5, "props": ["belt_b"]})
+
+    _belt(belts, {"command": "stop_belt", "belt": "in"})
+    _, a0 = _pose_at(sim, "belt_a")
+    _, b0 = _pose_at(sim, "belt_b")
+    time.sleep(0.1)
+
+    assert _pose_at(sim, "belt_a")[1] == pytest.approx(a0)
+    assert _pose_at(sim, "belt_b")[1][0] > b0[0]
+
+
+def test_a_prop_rides_at_its_offset_from_the_belt(belts, sim):
+    """A stack rides intact: loaded onto a halted belt, the top cube keeps its
+    place above the bottom once the belt runs."""
+    _belt(belts, {"command": "set_belt", "belt": "out", **OUT, "speed_mps": 0.0})
+    _belt(belts, {"command": "belt_add", "belt": "out", "prop": "belt_a"})
+    _belt(belts, {"command": "belt_add", "belt": "out", "prop": "belt_b", "offset": [0.0, 0.0, 0.03]})
+    _belt(belts, {"command": "set_belt", "belt": "out", **OUT, "speed_mps": 0.5})
+
+    time.sleep(0.2)
+    a, b = sim.run(lambda: [sim.get_prop_pose(p)["position"] for p in ("belt_a", "belt_b")])
+
+    assert a[0] > 0.05
+    assert b == pytest.approx([a[0], a[1], a[2] + 0.03])
+
+
+def test_a_prop_leaves_the_belt_at_its_stop(belts, sim):
+    _belt(belts, {"command": "set_belt", "belt": "in", **BELT, "speed_mps": 1.0})
+    _belt(
+        belts,
+        {"command": "belt_add", "belt": "in", "prop": "belt_a", "at_m": 0.2, "stop_m": 0.4, "offset": [0.0, 0.035, 0.0]},
+    )
+
+    time.sleep(0.4)
+
+    assert "belt_a" not in _belt(belts, {"command": "get_belt", "belt": "in"})["props"]
+    assert _pose_at(sim, "belt_a")[1] == pytest.approx([0.4, 1.035, 0.05])
+
+
+def test_belt_add_rejects_a_stop_behind_the_prop(belts):
+    _belt(belts, {"command": "set_belt", "belt": "in", **BELT, "speed_mps": 0.0})
+
+    with pytest.raises(ValueError, match="stop_m"):
+        _belt(belts, {"command": "belt_add", "belt": "in", "prop": "belt_a", "at_m": 0.5, "stop_m": 0.3})
+
+
 class _FakeRigidPrim:
     """Records batched writes; lists its prims in reverse so a caller must
     map props to view indices rather than assume config order."""
@@ -824,8 +897,9 @@ def test_isaac_belt_moves_cube_props_in_one_batched_write():
 
     manager._isaac = SimpleNamespace(RigidPrim=rigid_prim)
     manager.world = SimpleNamespace(scene=SimpleNamespace(add=lambda view: view))
-    manager._belt = Belt((0.0, 0.0, 0.1), (1.0, 0.0, 0.1), 1.0, wrap=True)
-    manager._belt.load(["a", "b"], 0.5)
+    belt = Belt((0.0, 0.0, 0.1), (1.0, 0.0, 0.1), 1.0, wrap=True)
+    belt.load(["a", "b"], 0.5)
+    manager._belts = {"default": belt}
 
     manager._advance_belt(0.25)
     manager._advance_belt(0.25)

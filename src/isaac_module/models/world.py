@@ -97,9 +97,13 @@ DoCommand:
   {"command": "set_belt", "start": [x, y, z], "end": [x, y, z],
    "speed_mps": 0.08, "wrap": true, "props": ["pool-0", "pool-1"],
    "spacing_m": 0.325, "orientation_wxyz": [1, 0, 0, 0]} |
-  {"command": "belt_add", "prop": "pool-2", "at_m": 0.0} |
+  {"command": "belt_add", "prop": "pool-2", "at_m": 0.0,
+   "offset": [dx, dy, dz], "stop_m": 0.5} |
   {"command": "belt_remove", "prop": "pool-2"} |
   {"command": "get_belt"} | {"command": "stop_belt"}
+
+  Every belt command takes an optional "belt" name (default "default");
+  named belts run at once, and a prop rides one belt at a time.
 
   The belt carries props along the segment start->end at speed_mps
   (simulator time), teleporting them every rendered step at the given
@@ -108,7 +112,9 @@ DoCommand:
   replaces the load; without props it keeps the load and changes the
   geometry or speed. With wrap (default true) a prop past the end returns
   to start; without, it stops at the end and leaves the belt. belt_add puts
-  a prop on at_m meters from start (default 0), belt_remove takes it off
+  a prop on at_m meters from start (default 0), riding offset meters from
+  the belt line (default none) and leaving the belt at stop_m meters from
+  start when given, wrap or not; belt_remove takes it off
   where it is, stop_belt halts and empties the belt. Each returns the
   belt: {"running", "start", "end", "speed_mps", "wrap",
   "props": {name: meters from start}}
@@ -129,6 +135,7 @@ from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes, struct_to_dict
 
 from .. import FAMILY, NAMESPACE
+from ..belt import DEFAULT_BELT
 from ..dataset_upload import UploadRequest, upload_episode
 from ..episode_schema import MINIMUM_STAGE_FRAMES
 from ..nudge import NudgeConfig
@@ -283,6 +290,7 @@ class IsaacWorld(Generic, EasyResource):
             return await asyncio.to_thread(
                 sim.set_prop_pose, prop, position, orientation
             )
+        belt = str(command.get("belt") or DEFAULT_BELT)
         if cmd == "set_belt":
             for key in ("start", "end", "speed_mps"):
                 if command.get(key) is None:
@@ -298,20 +306,27 @@ class IsaacWorld(Generic, EasyResource):
                 None if props is None else [str(name) for name in props],
                 None if spacing is None else float(spacing),
                 command.get("orientation_wxyz") or (1.0, 0.0, 0.0, 0.0),
+                belt,
             )
         if cmd in ("belt_add", "belt_remove"):
             prop = str(command.get("prop", ""))
             if not prop:
                 raise ValueError(f"{cmd} requires prop")
             if cmd == "belt_remove":
-                return await asyncio.to_thread(sim.belt_remove, prop)
+                return await asyncio.to_thread(sim.belt_remove, prop, belt)
+            stop = command.get("stop_m")
             return await asyncio.to_thread(
-                sim.belt_add, prop, float(command.get("at_m", 0.0))
+                sim.belt_add,
+                prop,
+                float(command.get("at_m", 0.0)),
+                command.get("offset") or (0.0, 0.0, 0.0),
+                None if stop is None else float(stop),
+                belt,
             )
         if cmd == "get_belt":
-            return await asyncio.to_thread(sim.get_belt)
+            return await asyncio.to_thread(sim.get_belt, belt)
         if cmd == "stop_belt":
-            return await asyncio.to_thread(sim.stop_belt)
+            return await asyncio.to_thread(sim.stop_belt, belt)
         if cmd == "start_episode":
             target = command.get("target")
             if not isinstance(target, Mapping):
