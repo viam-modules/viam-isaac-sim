@@ -231,24 +231,27 @@ class IsaacWorld(Generic, EasyResource):
         sim = SimManager.get()
         cmd = str(command.get("command", ""))
         if cmd == "status":
-            return sim.status()
+            return await asyncio.to_thread(sim.status)
         if cmd == "play":
-            sim.play()
+            await asyncio.to_thread(sim.play)
             return {"ok": True}
         if cmd == "pause":
-            sim.pause()
+            await asyncio.to_thread(sim.pause)
             return {"ok": True}
         if cmd == "reset":
-            sim.reset()
+            await asyncio.to_thread(sim.reset)
             return {"ok": True}
         if cmd == "park_props":
             props = command.get("props") or []
-            return sim.park_props([str(name) for name in props])
+            return await asyncio.to_thread(
+                sim.park_props, [str(name) for name in props]
+            )
         if cmd == "get_prop_pose":
             prop = str(command.get("prop", ""))
             if not prop:
                 raise ValueError("get_prop_pose requires prop")
-            return {"prop": prop, "pose": sim.get_prop_pose(prop)}
+            pose = await asyncio.to_thread(sim.get_prop_pose, prop)
+            return {"prop": prop, "pose": pose}
         if cmd == "set_prop_pose":
             prop = str(command.get("prop", ""))
             if not prop:
@@ -259,7 +262,9 @@ class IsaacWorld(Generic, EasyResource):
             orientation = command.get("orientation_wxyz")
             if not orientation:
                 raise ValueError("set_prop_pose requires orientation_wxyz")
-            return sim.set_prop_pose(prop, position, orientation)
+            return await asyncio.to_thread(
+                sim.set_prop_pose, prop, position, orientation
+            )
         if cmd == "start_episode":
             target = command.get("target")
             if not isinstance(target, Mapping):

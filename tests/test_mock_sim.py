@@ -283,6 +283,46 @@ def test_world_set_prop_pose_accepts_and_returns_posed(world):
     assert queried["pose"]["orientation_wxyz"] == pytest.approx(orientation_wxyz)
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        {
+            "command": "set_prop_pose",
+            "prop": "pick_block",
+            "position": [0.5, 0.1, 0.025],
+            "orientation_wxyz": [1.0, 0.0, 0.0, 0.0],
+        },
+        {"command": "get_prop_pose", "prop": "pick_block"},
+        {"command": "park_props", "props": ["pick_block"]},
+    ],
+    ids=lambda c: c["command"],
+)
+def test_world_prop_commands_leave_the_event_loop_free(world, sim, monkeypatch, command):
+    """A prop command waits for the sim thread without blocking the module's
+    event loop, so camera reads and other calls proceed meanwhile."""
+    sim_thread_delay = 0.3
+    real_run = sim.run
+
+    def slow_run(fn, timeout=30.0):
+        def slow_fn():
+            time.sleep(sim_thread_delay)
+            return fn()
+
+        return real_run(slow_fn, timeout)
+
+    monkeypatch.setattr(sim, "run", slow_run)
+
+    async def tick_lag() -> float:
+        pending = asyncio.create_task(world.do_command(command))
+        start = time.monotonic()
+        await asyncio.sleep(0.01)
+        lag = time.monotonic() - start
+        await pending
+        return lag
+
+    assert asyncio.run(tick_lag()) < sim_thread_delay / 2
+
+
 
 def test_validate_requires_world():
     with pytest.raises(ValueError, match="world"):
