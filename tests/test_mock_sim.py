@@ -61,7 +61,9 @@ def world(sim):
                         "position": [2.5, 0.0, 0.0125],
                         "size": 0.075,
                         "scale": [1.0, 0.2, 1.0 / 3.0],
-                    }
+                    },
+                    {"name": "belt_a", "type": "cube", "position": [0.0, 3.0, 0.05]},
+                    {"name": "belt_b", "type": "cube", "position": [0.5, 3.0, 0.05]},
                 ],
             },
         ),
@@ -294,6 +296,7 @@ def test_world_set_prop_pose_accepts_and_returns_posed(world):
         },
         {"command": "get_prop_pose", "prop": "pick_block"},
         {"command": "park_props", "props": ["pick_block"]},
+        {"command": "get_belt"},
     ],
     ids=lambda c: c["command"],
 )
@@ -636,3 +639,144 @@ def test_closing_an_arm_stops_it(world):
 
     assert stopped == [True]
     assert "closing-arm" not in SimManager.get()._handles
+
+
+BELT = {"start": [0.0, 1.0, 0.05], "end": [1.0, 1.0, 0.05]}
+
+
+def _belt(world, command: dict) -> dict:
+    return asyncio.run(world.do_command(command))
+
+
+def _pose_at(sim, prop: str) -> tuple[float, list[float]]:
+    """Sim time and a prop's position, read in one sim-thread task so no
+    belt step falls between them."""
+    t, pose = sim.run(lambda: (sim.sim_time_s(), sim.get_prop_pose(prop)))
+    return t, pose["position"]
+
+
+@pytest.fixture
+def belt(world):
+    yield world
+    _belt(world, {"command": "stop_belt"})
+
+
+def test_set_belt_spaces_props_from_start_and_carries_them_at_speed(belt, sim):
+    _belt(
+        belt,
+        {
+            "command": "set_belt",
+            **BELT,
+            "speed_mps": 0.5,
+            "spacing_m": 0.25,
+            "props": ["belt_a", "belt_b"],
+        },
+    )
+    a0, b0 = sim.run(
+        lambda: [sim.get_prop_pose(p)["position"] for p in ("belt_a", "belt_b")]
+    )
+    assert b0[0] - a0[0] == pytest.approx(0.25)
+    t0, a0 = _pose_at(sim, "belt_a")
+    assert a0[0] < 0.1
+    assert a0[1:] == pytest.approx([1.0, 0.05])
+
+    time.sleep(0.2)
+    t1, a1 = _pose_at(sim, "belt_a")
+
+    assert t1 - t0 > 0.1
+    assert a1[0] - a0[0] == pytest.approx(0.5 * (t1 - t0))
+    assert a1[1:] == pytest.approx([1.0, 0.05])
+
+
+def test_belt_wraps_a_prop_from_end_to_start(belt, sim):
+    _belt(belt, {"command": "set_belt", **BELT, "speed_mps": 1.0})
+    _belt(belt, {"command": "belt_add", "prop": "belt_a", "at_m": 0.9})
+
+    time.sleep(0.3)
+    _, position = _pose_at(sim, "belt_a")
+
+    assert position[0] < 0.6
+    assert "belt_a" in _belt(belt, {"command": "get_belt"})["props"]
+
+
+def test_belt_without_wrap_leaves_a_prop_at_the_end(belt, sim):
+    _belt(belt, {"command": "set_belt", **BELT, "speed_mps": 1.0, "wrap": False})
+    _belt(belt, {"command": "belt_add", "prop": "belt_a", "at_m": 0.9})
+
+    time.sleep(0.3)
+
+    assert "belt_a" not in _belt(belt, {"command": "get_belt"})["props"]
+    assert _pose_at(sim, "belt_a")[1] == pytest.approx(BELT["end"])
+
+
+def test_belt_add_puts_a_prop_on_at_the_start(belt, sim):
+    _belt(belt, {"command": "set_belt", **BELT, "speed_mps": 0.0})
+
+    _belt(belt, {"command": "belt_add", "prop": "belt_b"})
+
+    assert _pose_at(sim, "belt_b")[1] == pytest.approx(BELT["start"])
+    assert _belt(belt, {"command": "get_belt"})["props"] == {"belt_b": 0.0}
+
+
+def test_belt_remove_takes_a_prop_off_and_it_stops(belt, sim):
+    _belt(
+        belt,
+        {
+            "command": "set_belt",
+            **BELT,
+            "speed_mps": 0.5,
+            "props": ["belt_a", "belt_b"],
+        },
+    )
+
+    _belt(belt, {"command": "belt_remove", "prop": "belt_a"})
+    _, removed_at = _pose_at(sim, "belt_a")
+    _, b_before = _pose_at(sim, "belt_b")
+    time.sleep(0.1)
+
+    assert _pose_at(sim, "belt_a")[1] == pytest.approx(removed_at)
+    assert _pose_at(sim, "belt_b")[1][0] > b_before[0]
+    assert set(_belt(belt, {"command": "get_belt"})["props"]) == {"belt_b"}
+
+
+def test_set_belt_without_props_keeps_the_load_and_changes_speed(belt, sim):
+    _belt(belt, {"command": "set_belt", **BELT, "speed_mps": 0.5, "props": ["belt_a"]})
+
+    _belt(belt, {"command": "set_belt", **BELT, "speed_mps": 0.0})
+    _, held = _pose_at(sim, "belt_a")
+    time.sleep(0.1)
+
+    assert _pose_at(sim, "belt_a")[1] == pytest.approx(held)
+    assert set(_belt(belt, {"command": "get_belt"})["props"]) == {"belt_a"}
+
+
+def test_stop_belt_halts_and_empties_it(belt, sim):
+    _belt(belt, {"command": "set_belt", **BELT, "speed_mps": 0.5, "props": ["belt_a"]})
+
+    _belt(belt, {"command": "stop_belt"})
+    _, stopped_at = _pose_at(sim, "belt_a")
+    time.sleep(0.1)
+
+    assert _pose_at(sim, "belt_a")[1] == pytest.approx(stopped_at)
+    assert _belt(belt, {"command": "get_belt"}) == {"running": False, "props": {}}
+
+
+@pytest.mark.parametrize(
+    "command, message",
+    [
+        ({"command": "set_belt", "start": [0, 0, 0], "end": [0, 0, 0], "speed_mps": 1}, "length"),
+        ({"command": "set_belt", **BELT, "speed_mps": -1}, "speed_mps"),
+        ({"command": "set_belt", "end": [1, 0, 0], "speed_mps": 1}, "start"),
+        ({"command": "set_belt", **BELT, "speed_mps": 1, "props": ["nope"]}, "unknown prop"),
+        ({"command": "belt_add", "prop": "belt_a"}, "no belt"),
+    ],
+)
+def test_belt_commands_reject_bad_input(belt, command, message):
+    with pytest.raises(ValueError, match=message):
+        _belt(belt, command)
+
+
+def test_belt_add_rejects_a_position_off_the_belt(belt):
+    _belt(belt, {"command": "set_belt", **BELT, "speed_mps": 0.0})
+    with pytest.raises(ValueError, match="at_m"):
+        _belt(belt, {"command": "belt_add", "prop": "belt_a", "at_m": 1.5})

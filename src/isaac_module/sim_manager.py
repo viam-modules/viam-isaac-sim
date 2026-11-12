@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from viam.logging import getLogger
 
+from .belt import Belt
 from .bodies import (
     BodyHandle,
     BuoyancySpec,
@@ -980,6 +981,9 @@ class SimManager:
         self._shared_bases: list[tuple[Any, str, tuple[str, ...]]] = []
         self._prop_specs: dict[str, dict[str, Any]] = {}
         self._mock_prop_poses: dict[str, dict[str, Any]] = {}
+        # sim thread only: the kinematic belt and the orientation it holds props at
+        self._belt: Belt | None = None
+        self._belt_orientation: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
         # rigid bodies that motors push and movement sensors read, keyed by
         # prop name and by prim path
         self._bodies: dict[str, BodyHandle] = {}
@@ -1116,6 +1120,7 @@ class SimManager:
                     self._capture_after_render()
                 if pacer is not None:
                     pacer.after_step(step_dt)
+            self._advance_belt(sim_dt)
             self._stats.record(step_s, time.perf_counter() - loop_start, sim_dt)
 
         if self._episode_id is not None:
@@ -2528,6 +2533,103 @@ class SimManager:
             return {"poses": poses}
 
         return self.run(park)
+
+    # ------------------------------------------------------------------
+    # kinematic belt: props teleported along a segment every rendered step
+    # ------------------------------------------------------------------
+
+    def _belt_state(self) -> dict[str, Any]:
+        belt = self._belt
+        if belt is None:
+            return {"running": False, "props": {}}
+        return {
+            "running": True,
+            "start": list(belt.start),
+            "end": list(belt.end),
+            "speed_mps": belt.speed_mps,
+            "wrap": belt.wrap,
+            "props": dict(belt.props),
+        }
+
+    def _place_on_belt(self, placed: Mapping[str, tuple[float, float, float]]) -> None:
+        for name, position in placed.items():
+            self._set_prop_pose(name, position, self._belt_orientation)
+
+    def _advance_belt(self, dt: float) -> None:
+        if self._belt is None:
+            return
+        try:
+            self._place_on_belt(self._belt.advance(dt))
+        except Exception:
+            LOGGER.exception("belt step failed; stopping the belt")
+            self._belt = None
+
+    def set_belt(
+        self,
+        start: Sequence[float],
+        end: Sequence[float],
+        speed_mps: float,
+        wrap: bool = True,
+        props: Sequence[str] | None = None,
+        spacing_m: float | None = None,
+        orientation: Sequence[float] = (1.0, 0.0, 0.0, 0.0),
+    ) -> dict[str, Any]:
+        self._require_booted()
+        belt = Belt(
+            _vector3(start, "start"), _vector3(end, "end"), float(speed_mps), wrap
+        )
+        ori = _quaternion(orientation, "orientation_wxyz")
+        names = None if props is None else [self._prop_spec(str(n))[0] for n in props]
+
+        def apply() -> dict[str, Any]:
+            if names is None:
+                if self._belt is not None:
+                    belt.props = {
+                        name: min(at_m, belt.length_m)
+                        for name, at_m in self._belt.props.items()
+                    }
+                placed = {}
+            else:
+                placed = belt.load(names, spacing_m)
+            self._belt = belt
+            self._belt_orientation = ori
+            self._place_on_belt(placed)
+            return self._belt_state()
+
+        return self.run(apply)
+
+    def stop_belt(self) -> dict[str, Any]:
+        def stop() -> dict[str, Any]:
+            self._belt = None
+            return self._belt_state()
+
+        return self.run(stop)
+
+    def belt_add(self, name: str, at_m: float = 0.0) -> dict[str, Any]:
+        self._require_booted()
+        prim_name, _spec = self._prop_spec(name)
+
+        def add() -> dict[str, Any]:
+            if self._belt is None:
+                raise ValueError("no belt is running; send set_belt first")
+            self._place_on_belt({prim_name: self._belt.add(prim_name, float(at_m))})
+            return self._belt_state()
+
+        return self.run(add)
+
+    def belt_remove(self, name: str) -> dict[str, Any]:
+        self._require_booted()
+        prim_name, _spec = self._prop_spec(name)
+
+        def remove() -> dict[str, Any]:
+            if self._belt is not None:
+                self._belt.props.pop(prim_name, None)
+            return self._belt_state()
+
+        return self.run(remove)
+
+    def get_belt(self) -> dict[str, Any]:
+        return self.run(self._belt_state)
 
     def add_usd_reference(
         self,
