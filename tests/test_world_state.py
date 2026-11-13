@@ -3,6 +3,7 @@ sync loop run against an in-memory stand-in for rdk's builtin store."""
 
 import asyncio
 import base64
+import json
 import math
 import threading
 
@@ -13,6 +14,7 @@ from viam.proto.common import ResourceName, Transform
 from viam.services.worldstatestore import WorldStateStore
 from viam.utils import dict_to_struct, struct_to_dict
 
+from isaac_module import world_state
 from isaac_module.models.world import IsaacWorld
 from isaac_module.sim_manager import SimManager, fan_triangles
 from isaac_module.world_state import (
@@ -40,8 +42,12 @@ class FakeStore(WorldStateStore):
         self.transforms: dict[bytes, Transform] = {}
         # the commands each call carried, e.g. [["add"], ["remove", "add"]]
         self.calls: list[list[str]] = []
+        # refuse larger commands, as a gRPC message size limit would
+        self.max_command_bytes: int | None = None
 
     async def list_uuids(self, **kwargs):
+        # a real call crosses the network, so other tasks run meanwhile
+        await asyncio.sleep(0.002)
         return list(self.transforms)
 
     async def get_transform(self, uuid, **kwargs):
@@ -51,9 +57,14 @@ class FakeStore(WorldStateStore):
         raise NotImplementedError
 
     async def do_command(self, command, **kwargs):
+        await asyncio.sleep(0.002)
         # the same trip through a protobuf Struct that gRPC gives it
         command = struct_to_dict(dict_to_struct(command))
         assert command and set(command) <= {"remove", "add", "update"}
+        if self.max_command_bytes is not None:
+            size = len(json.dumps(command))
+            if size > self.max_command_bytes:
+                raise ValueError(f"message of {size} bytes is too large")
         self.calls.append([k for k in ("remove", "add", "update") if k in command])
         staged = dict(self.transforms)
         response: dict[str, list[str]] = {}
@@ -332,19 +343,104 @@ def test_sync_clears_what_an_earlier_run_left_and_leaves_others_alone():
 def test_sync_recovers_when_the_store_is_emptied():
     async def scenario():
         store = FakeStore()
-        obstacles = [_box("block")]
-        sync = _sync(store, obstacles, hz=200.0)
+        obstacles = [_box("block"), _box("pad", x=1.0)]
+        sync = _sync(store, obstacles, hz=200.0, verify_s=0.05)
         sync.start()
-        await _until(lambda: "block" in store.by_frame())
+        await _until(lambda: len(store.transforms) == 2)
 
-        store.transforms = {}  # viam-server rebuilt the store
-        obstacles[0] = _box("block", x=1.0)
-        await _until(lambda: "block" in store.by_frame())
-        assert store.by_frame()["block"].pose_in_observer_frame.pose.x == 1000.0
+        # viam-server rebuilt the store. Nothing moves, so no update fails to
+        # give it away: only the periodic check can notice.
+        store.transforms = {}
+        await _until(lambda: set(store.by_frame()) == {"block", "pad"})
         assert sync.last_error == ""
+
+        # the same for a single transform someone else removed
+        del store.transforms[collider_transform("sim-world", obstacles[0]).uuid]
+        await _until(lambda: set(store.by_frame()) == {"block", "pad"})
 
         await sync.stop()
         assert store.transforms == {}
+
+    asyncio.run(scenario())
+
+
+def test_stop_removes_only_what_this_sync_published():
+    async def scenario():
+        store = FakeStore()
+        obstacles = [_box("block"), _box("pad")]
+        newer = _sync(store, obstacles)
+        await newer.sync_once()
+
+        # an older sync for the same world, stopped late: same uuid prefix,
+        # but none of this is its to remove
+        older = _sync(store, obstacles)
+        await older.stop()
+        assert set(store.by_frame()) == {"block", "pad"}
+
+        # one of its own transforms already being gone doesn't keep the rest
+        del store.transforms[collider_transform("sim-world", obstacles[0]).uuid]
+        await newer.stop()
+        assert store.transforms == {}
+
+    asyncio.run(scenario())
+
+
+def test_large_adds_are_split_to_fit_the_message_limit(monkeypatch):
+    # base64 makes a mesh a third larger on the wire than its PLY
+    mesh = bytes(3600)
+    limit = 8000
+    assert len(mesh) * 4 // 3 * 2 > limit  # two meshes can't share a command
+    monkeypatch.setattr(world_state, "MAX_COMMAND_BYTES", limit)
+
+    async def scenario():
+        store = FakeStore()
+        store.max_command_bytes = limit
+        obstacles = [_box(f"chair{i}", mesh_ply=mesh) for i in range(3)]
+        sync = _sync(store, obstacles, render="both")
+
+        await sync.sync_once()
+        assert len(store.transforms) == 6  # a collider and a mesh each
+        assert len(store.calls) == 3 and all(c == ["add"] for c in store.calls)
+
+        # small changes still travel together
+        obstacles[0] = _box("chair0", x=1.0, mesh_ply=mesh)
+        del obstacles[2]
+        await sync.sync_once()
+        assert store.calls[-1] == ["remove", "update"]
+
+        # a replacement that needs several commands still removes first
+        store.calls.clear()
+        bigger = bytes(3700)
+        obstacles[:] = [
+            _box("chair0", x=1.0, mesh_ply=bigger),
+            _box("chair1", mesh_ply=bigger),
+        ]
+        await sync.sync_once()
+        assert store.calls == [["remove", "add"], ["add"]]
+        meshes = [
+            t.physical_object.mesh.mesh
+            for t in store.transforms.values()
+            if t.physical_object.HasField("mesh")
+        ]
+        assert meshes == [bigger, bigger]
+
+    asyncio.run(scenario())
+
+
+def test_a_split_tick_that_fails_part_way_is_reconciled():
+    async def scenario():
+        store = FakeStore()
+        obstacles = [_box("block")]
+        sync = _sync(store, obstacles)
+        await sync.sync_once()
+
+        # the store loses a transform, so the next update is refused
+        store.transforms = {}
+        obstacles[0] = _box("block", x=1.0)
+        with pytest.raises(ValueError, match="not found"):
+            await sync.sync_once()
+        await sync.sync_once()
+        assert store.by_frame()["block"].pose_in_observer_frame.pose.x == 1000.0
 
     asyncio.run(scenario())
 
@@ -425,6 +521,71 @@ def test_sim_snapshot_selects_and_measures_props(sim):
     assert obstacles["pick_block"].position == (2.5, 0.0, 0.02)
     assert obstacles["pick_block"].color == (1.0, 0.0, 0.0)
     assert obstacles["barrel"].collider == Collider("capsule", (0.3, 0.9))
+
+
+def test_one_unreadable_prop_does_not_hide_the_rest(sim, monkeypatch, caplog):
+    IsaacWorld.new(_config("sim-world", WORLD_ATTRS), {})
+    read_pose = sim._obstacle_pose
+
+    def flaky(name, prim_path):
+        if name == "pad":
+            raise RuntimeError("prim is not valid")
+        return read_pose(name, prim_path)
+
+    monkeypatch.setattr(sim, "_obstacle_pose", flaky)
+    with caplog.at_level("ERROR"):
+        assert {o.name for o in sim.world_state_obstacles()} == {"pick_block", "barrel"}
+        assert {o.name for o in sim.world_state_obstacles()} == {"pick_block", "barrel"}
+    # reported once, not on every snapshot
+    assert sum("pad is left out" in r.getMessage() for r in caplog.records) == 1
+
+    monkeypatch.setattr(sim, "_obstacle_pose", read_pose)
+    assert {o.name for o in sim.world_state_obstacles()} == {
+        "pick_block",
+        "pad",
+        "barrel",
+    }
+
+
+def test_rapid_reconfigures_leave_exactly_the_last_sync(sim):
+    async def scenario():
+        store = FakeStore()
+        deps = {ResourceName(name="world_state_store"): store}
+        world = IsaacWorld.new(_config("sim-world", WORLD_ATTRS), deps)
+        await _until(lambda: len(store.transforms) == 3)
+
+        # three more configs before any changeover gets to run
+        syncs = [world._world_state]
+        for hz in (50, 150, 200):
+            world.reconfigure(
+                _config("sim-world", {**WORLD_ATTRS, "world_state_sync_hz": hz}), deps
+            )
+            syncs.append(world._world_state)
+        await asyncio.wait([world._world_state_swap])
+
+        # only the newest is running, and no older one clears what it publishes
+        assert [s._task is not None for s in syncs] == [False, False, False, True]
+        await _until(lambda: len(store.transforms) == 3)
+        await asyncio.sleep(0.1)
+        assert len(store.transforms) == 3
+
+        # a rebuilt store is a new client object: the sync moves over to it
+        rebuilt = FakeStore()
+        world.reconfigure(
+            _config("sim-world", {**WORLD_ATTRS, "world_state_sync_hz": 200}),
+            {ResourceName(name="world_state_store"): rebuilt},
+        )
+        await _until(lambda: len(rebuilt.transforms) == 3 and not store.transforms)
+
+        # close with a changeover still pending: nothing is left running
+        world.reconfigure(_config("sim-world", WORLD_ATTRS), deps)
+        pending = world._world_state
+        await world.close()
+        assert pending._task is None
+        await asyncio.sleep(0.05)
+        assert not store.transforms and not rebuilt.transforms
+
+    asyncio.run(scenario())
 
 
 def test_world_publishes_props_and_follows_them(sim):

@@ -995,6 +995,8 @@ class SimManager:
         # obstacle name -> PLY bytes (None: no usable mesh)
         self._obstacle_colliders: dict[str, Collider | None] = {}
         self._obstacle_meshes: dict[str, bytes | None] = {}
+        # props whose read failed on the last snapshot, so each is logged once
+        self._obstacle_errors: set[str] = set()
         # rigid bodies that motors push and movement sensors read, keyed by
         # prop name and by prim path
         self._bodies: dict[str, BodyHandle] = {}
@@ -2609,32 +2611,50 @@ class SimManager:
             for name, prim_path, spec in sources:
                 if not spec.get("world_state", True):
                     continue
-                collider = self._obstacle_collider(name, prim_path, spec)
-                if collider is None:
+                # one prim that can't be read (a failed load, a prim deleted
+                # from the stage) must not take every other prop with it
+                try:
+                    obstacle = self._obstacle(name, prim_path, spec, include_meshes)
+                except Exception:
+                    if name not in self._obstacle_errors:
+                        self._obstacle_errors.add(name)
+                        LOGGER.exception(
+                            "%s is left out of the world state store until it "
+                            "can be read",
+                            name,
+                        )
                     continue
-                position, orientation = self._obstacle_pose(name, prim_path)
-                color = spec.get("color")
-                obstacles.append(
-                    Obstacle(
-                        name=name,
-                        position=position,
-                        orientation_wxyz=orientation,
-                        collider=collider,
-                        color=(
-                            (float(color[0]), float(color[1]), float(color[2]))
-                            if color is not None
-                            else None
-                        ),
-                        mesh_ply=(
-                            self._obstacle_mesh(name, prim_path, spec)
-                            if include_meshes
-                            else None
-                        ),
-                    )
-                )
+                self._obstacle_errors.discard(name)
+                if obstacle is not None:
+                    obstacles.append(obstacle)
             return obstacles
 
         return self.run(read)
+
+    def _obstacle(
+        self, name: str, prim_path: str, spec: dict[str, Any], include_meshes: bool
+    ) -> Obstacle | None:
+        """Sim thread only: one prop as an obstacle, or None when it has no
+        collider to publish."""
+        collider = self._obstacle_collider(name, prim_path, spec)
+        if collider is None:
+            return None
+        position, orientation = self._obstacle_pose(name, prim_path)
+        color = spec.get("color")
+        return Obstacle(
+            name=name,
+            position=position,
+            orientation_wxyz=orientation,
+            collider=collider,
+            color=(
+                (float(color[0]), float(color[1]), float(color[2]))
+                if color is not None
+                else None
+            ),
+            mesh_ply=(
+                self._obstacle_mesh(name, prim_path, spec) if include_meshes else None
+            ),
+        )
 
     def _obstacle_pose(
         self, name: str, prim_path: str

@@ -48,8 +48,15 @@ DEFAULT_STORE_NAME = "world_state_store"
 WORLD_FRAME = "world"
 RENDER_MODES = ("colliders", "models", "both")
 DEFAULT_SYNC_HZ = 5.0
-# a mesh travels in a single gRPC message
+# The store takes transforms as proto JSON inside a DoCommand, so a mesh's
+# bytes travel base64 encoded, a third larger than the PLY. viam-server accepts
+# messages up to 32 MiB (goutils rpc.MaxMessageSize); one command stays well
+# under that, and a mesh has to fit in a command with room to spare.
+MAX_COMMAND_BYTES = 16 * 1024 * 1024
 MAX_MESH_BYTES = 4 * 1024 * 1024
+# how often to check that the store still holds what was published: a prop at
+# rest sends nothing, so nothing else would notice the store being emptied
+DEFAULT_VERIFY_S = 2.0
 
 # a pose has to move this far before it is sent again, so physics jitter on a
 # resting prop is not a stream of updates
@@ -285,6 +292,43 @@ def _uuid_json(uuid: bytes) -> dict[str, Any]:
     return {"uuid": base64.b64encode(uuid).decode()}
 
 
+# generous sizes for the small items of a command, in bytes on the wire
+_REMOVE_BYTES = 128
+_UPDATE_BYTES = 512
+_ADD_OVERHEAD_BYTES = 1024
+
+
+def _encoded_size(transform: Transform) -> int:
+    """About how large a transform is as proto JSON: its bytes fields (a mesh)
+    grow by a third in base64, and the rest is small."""
+    return transform.ByteSize() * 4 // 3 + _ADD_OVERHEAD_BYTES
+
+
+def _commands(
+    removes: Sequence[dict[str, Any]],
+    adds: Sequence[tuple[dict[str, Any], int]],
+    updates: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """The DoCommands for one tick: a single command when everything fits in
+    MAX_COMMAND_BYTES, otherwise the removes and updates with as many adds as
+    fit, then the remaining adds in commands of their own. Removes go first so
+    a transform can be replaced under the same uuid."""
+    first: dict[str, Any] = {}
+    if removes:
+        first["remove"] = list(removes)
+    if updates:
+        first["update"] = list(updates)
+    commands = [first]
+    size = len(removes) * _REMOVE_BYTES + len(updates) * _UPDATE_BYTES
+    for item, item_size in adds:
+        if size + item_size > MAX_COMMAND_BYTES and commands[-1]:
+            commands.append({})
+            size = 0
+        commands[-1].setdefault("add", []).append(item)
+        size += item_size
+    return [command for command in commands if command]
+
+
 def _pose_moved(a: tuple[Vec3, Quat], b: tuple[Vec3, Quat]) -> bool:
     if math.dist(a[0], b[0]) > POSITION_EPSILON_M:
         return True
@@ -314,6 +358,7 @@ class WorldStateSync:
         world_name: str,
         hz: float = DEFAULT_SYNC_HZ,
         render: str = "colliders",
+        verify_s: float = DEFAULT_VERIFY_S,
     ) -> None:
         if render not in RENDER_MODES:
             raise ValueError(f"render must be one of {list(RENDER_MODES)}")
@@ -327,6 +372,8 @@ class WorldStateSync:
         # the store may hold transforms from an earlier run, or have been
         # emptied by a viam-server rebuild: start from what it really has
         self._needs_reconcile = True
+        self._verify_every = max(1, round(verify_s * hz))
+        self._ticks_since_verify = 0
         self._task: asyncio.Task | None = None
         self.last_error = ""
 
@@ -351,9 +398,6 @@ class WorldStateSync:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                # whatever went wrong, the store may no longer match what we
-                # think we published
-                self._needs_reconcile = True
                 message = f"{type(e).__name__}: {e}"
                 if message != self.last_error:
                     LOGGER.warning(
@@ -365,7 +409,12 @@ class WorldStateSync:
             await asyncio.sleep(self._period_s)
 
     async def stop(self) -> None:
-        """Stop syncing and take our transforms out of the store."""
+        """Stop syncing and take what this sync published out of the store.
+
+        Only its own transforms: a newer sync for the same world shares the
+        uuid prefix, and may already have published by the time this runs.
+        Anything else left behind is cleared by the next sync's first tick.
+        """
         task, self._task = self._task, None
         if task is not None:
             task.cancel()
@@ -373,16 +422,19 @@ class WorldStateSync:
                 await task
             except asyncio.CancelledError:
                 pass
+        published, self._published = self._published, {}
+        self._needs_reconcile = True
+        if not published:
+            return
         try:
-            leftovers = await self._ours_in_store()
+            # one missing uuid would fail the whole remove
+            leftovers = [u for u in await self._ours_in_store() if u in published]
             if leftovers:
                 await self._store.do_command(
                     {"remove": [_uuid_json(uuid) for uuid in leftovers]}
                 )
         except Exception as e:
             LOGGER.warning("could not clear world state store %r: %s", self.store_name, e)
-        self._published = {}
-        self._needs_reconcile = True
 
     async def _ours_in_store(self) -> list[bytes]:
         return [
@@ -411,9 +463,20 @@ class WorldStateSync:
                     ),
                 )
 
-        # Work out the whole change first and send it as one command: the
-        # store applies a call's remove, add and update lists in that order,
-        # all or nothing, so it never shows a half-applied tick.
+        self._ticks_since_verify += 1
+        if not self._needs_reconcile and self._ticks_since_verify >= self._verify_every:
+            self._ticks_since_verify = 0
+            if set(await self._ours_in_store()) != set(self._published):
+                LOGGER.info(
+                    "world state store %r no longer matches what was published; "
+                    "republishing",
+                    self.store_name,
+                )
+                self._needs_reconcile = True
+
+        # Work out the whole change first. The store applies a call's remove,
+        # add and update lists in that order, all or nothing, so a tick that
+        # fits in one command never shows half applied.
         if self._needs_reconcile:
             published: dict[bytes, _Published] = {}
             removed = await self._ours_in_store()
@@ -434,24 +497,26 @@ class WorldStateSync:
             if pose is not None and state.pose is not None and _pose_moved(pose, state.pose):
                 moved[uuid] = pose
 
-        command: dict[str, Any] = {}
-        if removed:
-            command["remove"] = [_uuid_json(uuid) for uuid in removed]
-        if added:
-            command["add"] = [transform_json(t) for t, _ in added.values()]
-        if moved:
-            # name the whole pose: proto JSON leaves out zero fields, and the
-            # store would otherwise keep a stale x when a prop returns to x=0
-            command["update"] = [
-                {
-                    **_uuid_json(uuid),
-                    "poseInObserverFrame": {"pose": MessageToDict(pose_proto(*pose))},
-                    "updatedFields": [_POSE_FIELD],
-                }
-                for uuid, pose in moved.items()
-            ]
-        if command:
-            await self._store.do_command(command)
+        removes = [_uuid_json(uuid) for uuid in removed]
+        # name the whole pose: proto JSON leaves out zero fields, and the
+        # store would otherwise keep a stale x when a prop returns to x=0
+        updates = [
+            {
+                **_uuid_json(uuid),
+                "poseInObserverFrame": {"pose": MessageToDict(pose_proto(*pose))},
+                "updatedFields": [_POSE_FIELD],
+            }
+            for uuid, pose in moved.items()
+        ]
+        adds = [(transform_json(t), _encoded_size(t)) for t, _ in added.values()]
+        try:
+            for command in _commands(removes, adds, updates):
+                await self._store.do_command(command)
+        except Exception:
+            # some of it may have been applied: start again from what the
+            # store really holds
+            self._needs_reconcile = True
+            raise
 
         # only now that the store has taken it
         published.update({u: state for u, (_, state) in added.items()})
@@ -459,3 +524,5 @@ class WorldStateSync:
             published[uuid] = _Published(published[uuid].signature, pose)
         self._published = published
         self._needs_reconcile = False
+        if removed or added:
+            self._ticks_since_verify = 0

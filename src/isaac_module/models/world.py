@@ -160,7 +160,10 @@ class IsaacWorld(Generic, EasyResource):
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "world")
 
     _world_state: WorldStateSync | None = None
+    # (store, hz, render) of the running sync
     _world_state_settings: tuple | None = None
+    # the newest link in a chain of sync changeovers, each waiting on the last
+    _world_state_swap: asyncio.Task | None = None
 
     @classmethod
     def new(
@@ -275,8 +278,16 @@ class IsaacWorld(Generic, EasyResource):
         )
         hz = float(attrs.get("world_state_sync_hz", DEFAULT_SYNC_HZ))
         render = str(attrs.get("world_state_render", "colliders"))
-        settings = (id(store), hz, render) if store is not None else None
-        if settings == self._world_state_settings:
+        settings = (store, hz, render) if store is not None else None
+        current = self._world_state_settings
+        # the store by identity: a rebuilt one is a new client, even if it
+        # compares or hashes like the old
+        if (settings is None and current is None) or (
+            settings is not None
+            and current is not None
+            and settings[0] is current[0]
+            and settings[1:] == current[1:]
+        ):
             return
         try:
             loop = asyncio.get_running_loop()
@@ -286,9 +297,10 @@ class IsaacWorld(Generic, EasyResource):
             return
         previous, self._world_state = self._world_state, None
         self._world_state_settings = settings
+        replacement: WorldStateSync | None = None
         if store is not None:
             include_meshes = render != "colliders"
-            self._world_state = WorldStateSync(
+            replacement = self._world_state = WorldStateSync(
                 store,
                 lambda: sim.world_state_obstacles(include_meshes),
                 self.name,
@@ -297,18 +309,32 @@ class IsaacWorld(Generic, EasyResource):
             )
             LOGGER.info("publishing props to world state store %r", store_name)
 
+        earlier = self._world_state_swap
+
         async def swap() -> None:
-            # the old sync clears the store before the new one fills it
-            if previous is not None:
-                await previous.stop()
-            if self._world_state is not None:
-                self._world_state.start()
+            # One changeover at a time, in order: reconfigures can arrive
+            # faster than a sync takes to stop, and an old sync clearing the
+            # store must never run after a newer one has filled it.
+            if earlier is not None:
+                await asyncio.wait([earlier])
+            try:
+                if previous is not None:
+                    await previous.stop()
+                # a later reconfigure, or close, may have replaced it already
+                if replacement is not None and self._world_state is replacement:
+                    replacement.start()
+            except Exception:
+                LOGGER.exception("could not change the world state sync")
 
         self._world_state_swap = loop.create_task(swap())
 
     async def close(self) -> None:
         sync, self._world_state = self._world_state, None
         self._world_state_settings = None
+        swap, self._world_state_swap = self._world_state_swap, None
+        if swap is not None:
+            # let pending changeovers finish; none will start a sync now
+            await asyncio.wait([swap])
         if sync is not None:
             await sync.stop()
 
