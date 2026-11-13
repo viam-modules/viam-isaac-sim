@@ -31,13 +31,15 @@ from isaac_module.world_state import (
 
 
 class FakeStore(WorldStateStore):
-    """rdk's builtin store, as far as the sync uses it: add / update / remove
-    DoCommands over proto JSON transforms, each applied whole or not at all."""
+    """rdk's builtin store, as far as the sync uses it. One DoCommand carries
+    any of remove / add / update, each a list of proto JSON transforms; they
+    are applied in that order, and the call takes effect whole or not at all."""
 
     def __init__(self, name: str = "world_state_store") -> None:
         super().__init__(name)
         self.transforms: dict[bytes, Transform] = {}
-        self.commands: list[str] = []
+        # the commands each call carried, e.g. [["add"], ["remove", "add"]]
+        self.calls: list[list[str]] = []
 
     async def list_uuids(self, **kwargs):
         return list(self.transforms)
@@ -51,35 +53,37 @@ class FakeStore(WorldStateStore):
     async def do_command(self, command, **kwargs):
         # the same trip through a protobuf Struct that gRPC gives it
         command = struct_to_dict(dict_to_struct(command))
-        (kind,) = command
-        self.commands.append(kind)
+        assert command and set(command) <= {"remove", "add", "update"}
+        self.calls.append([k for k in ("remove", "add", "update") if k in command])
         staged = dict(self.transforms)
-        for item in command[kind]:
-            item = dict(item)
-            paths = item.pop("updatedFields", None)
-            transform = ParseDict(item, Transform())
-            if kind == "add":
-                assert transform.reference_frame
-                assert transform.pose_in_observer_frame.reference_frame
-                if transform.uuid in staged:
-                    raise ValueError("already exists")
-                staged[transform.uuid] = transform
-            elif kind == "update":
-                if transform.uuid not in staged:
-                    raise ValueError("not found")
-                assert paths == ["pose_in_observer_frame.pose"]
-                merged = Transform()
-                merged.CopyFrom(staged[transform.uuid])
-                merged.pose_in_observer_frame.pose.CopyFrom(
-                    transform.pose_in_observer_frame.pose
-                )
-                staged[transform.uuid] = merged
-            elif kind == "remove":
-                if transform.uuid not in staged:
-                    raise ValueError("not found")
-                del staged[transform.uuid]
+        response: dict[str, list[str]] = {}
+        for kind in ("remove", "add", "update"):
+            for index, item in enumerate(command.get(kind, [])):
+                item = dict(item)
+                paths = item.pop("updatedFields", None)
+                transform = ParseDict(item, Transform())
+                where = f"{kind}[{index}]"
+                if kind == "add":
+                    assert transform.reference_frame
+                    assert transform.pose_in_observer_frame.reference_frame
+                    if transform.uuid in staged:
+                        raise ValueError(f"{where}: transform already exists")
+                    staged[transform.uuid] = transform
+                elif transform.uuid not in staged:
+                    raise ValueError(f"{where}: transform not found")
+                elif kind == "remove":
+                    del staged[transform.uuid]
+                else:
+                    assert paths == ["pose_in_observer_frame.pose"]
+                    merged = Transform()
+                    merged.CopyFrom(staged[transform.uuid])
+                    merged.pose_in_observer_frame.pose.CopyFrom(
+                        transform.pose_in_observer_frame.pose
+                    )
+                    staged[transform.uuid] = merged
+                response.setdefault(kind, []).append(item["uuid"])
         self.transforms = staged
-        return {}
+        return response
 
     def by_frame(self) -> dict[str, Transform]:
         return {t.reference_frame: t for t in self.transforms.values()}
@@ -238,18 +242,18 @@ def test_sync_adds_then_only_sends_what_moved():
 
         await sync.sync_once()
         assert set(store.by_frame()) == {"block", "pad"}
-        assert store.commands == ["add"]
+        assert store.calls == [["add"]]
 
         await sync.sync_once()
-        assert store.commands == ["add"]  # nothing moved: no traffic
+        assert store.calls == [["add"]]  # nothing moved: no traffic
 
         obstacles[0] = _box("block", x=0.0001)  # under the threshold
         await sync.sync_once()
-        assert store.commands == ["add"]
+        assert store.calls == [["add"]]
 
         obstacles[0] = _box("block", x=0.5)
         await sync.sync_once()
-        assert store.commands == ["add", "update"]
+        assert store.calls == [["add"], ["update"]]
         assert store.by_frame()["block"].pose_in_observer_frame.pose.x == 500.0
         assert store.by_frame()["block"].physical_object.HasField("box")
 
@@ -272,11 +276,37 @@ def test_sync_removes_props_that_go_away_and_readds_changed_geometry():
         await sync.sync_once()
         assert set(store.by_frame()) == {"block"}
 
+        # new geometry under the same uuid: replaced within one call
         obstacles[0] = Obstacle(
             "block", (0, 0, 0), (1, 0, 0, 0), Collider("sphere", (0.1,))
         )
         await sync.sync_once()
         assert store.by_frame()["block"].physical_object.HasField("sphere")
+        assert store.calls[-1] == ["remove", "add"]
+
+
+def test_one_tick_is_one_call_and_a_rejected_call_is_retried_whole():
+    async def scenario():
+        store = FakeStore()
+        obstacles = [_box("block"), _box("pad"), _box("gone")]
+        sync = _sync(store, obstacles)
+        await sync.sync_once()
+
+        obstacles[:] = [_box("block", x=1.0), _box("pad"), _box("new")]
+        await sync.sync_once()
+        assert store.calls[-1] == ["remove", "add", "update"]
+        assert set(store.by_frame()) == {"block", "pad", "new"}
+
+        # someone else removed one of ours: the next change to it is refused,
+        # and the store keeps everything else that call carried out
+        del store.transforms[collider_transform("sim-world", _box("block")).uuid]
+        obstacles[:] = [_box("block", x=2.0), _box("pad"), _box("new"), _box("more")]
+        with pytest.raises(ValueError, match="not found"):
+            await sync.sync_once()
+        assert set(store.by_frame()) == {"pad", "new"}
+        assert sync.published_count == 3  # nothing recorded as sent
+
+    asyncio.run(scenario())
 
     asyncio.run(scenario())
 
@@ -291,6 +321,7 @@ def test_sync_clears_what_an_earlier_run_left_and_leaves_others_alone():
         sync = _sync(store, [_box("block")])
         await sync.sync_once()
         assert set(store.by_frame()) == {"block", "theirs"}
+        assert store.calls == [["remove", "add"]]
 
         await sync.stop()
         assert set(store.by_frame()) == {"theirs"}

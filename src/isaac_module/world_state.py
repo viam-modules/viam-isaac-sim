@@ -281,6 +281,10 @@ def ply_bytes(
     return header + bytes(body)
 
 
+def _uuid_json(uuid: bytes) -> dict[str, Any]:
+    return {"uuid": base64.b64encode(uuid).decode()}
+
+
 def _pose_moved(a: tuple[Vec3, Quat], b: tuple[Vec3, Quat]) -> bool:
     if math.dist(a[0], b[0]) > POSITION_EPSILON_M:
         return True
@@ -370,7 +374,11 @@ class WorldStateSync:
             except asyncio.CancelledError:
                 pass
         try:
-            await self._remove(await self._ours_in_store())
+            leftovers = await self._ours_in_store()
+            if leftovers:
+                await self._store.do_command(
+                    {"remove": [_uuid_json(uuid) for uuid in leftovers]}
+                )
         except Exception as e:
             LOGGER.warning("could not clear world state store %r: %s", self.store_name, e)
         self._published = {}
@@ -382,12 +390,6 @@ class WorldStateSync:
             for u in await self._store.list_uuids()
             if bytes(u).startswith(self._prefix)
         ]
-
-    async def _remove(self, uuids: Sequence[bytes]) -> None:
-        if uuids:
-            await self._store.do_command(
-                {"remove": [{"uuid": base64.b64encode(u).decode()} for u in uuids]}
-            )
 
     async def sync_once(self) -> None:
         """Bring the store in line with one snapshot of the sim."""
@@ -409,51 +411,51 @@ class WorldStateSync:
                     ),
                 )
 
+        # Work out the whole change first and send it as one command: the
+        # store applies a call's remove, add and update lists in that order,
+        # all or nothing, so it never shows a half-applied tick.
         if self._needs_reconcile:
-            await self._remove(await self._ours_in_store())
-            self._published = {}
-            self._needs_reconcile = False
+            published: dict[bytes, _Published] = {}
+            removed = await self._ours_in_store()
+        else:
+            published = dict(self._published)
+            removed = [
+                uuid
+                for uuid, state in published.items()
+                if uuid not in desired or desired[uuid][1].signature != state.signature
+            ]
+            for uuid in removed:
+                del published[uuid]
 
-        stale = [
-            uuid
-            for uuid, published in self._published.items()
-            if uuid not in desired or desired[uuid][1].signature != published.signature
-        ]
-        if stale:
-            await self._remove(stale)
-            for uuid in stale:
-                del self._published[uuid]
-
-        added = {u: d for u, d in desired.items() if u not in self._published}
-        if added:
-            await self._store.do_command(
-                {"add": [transform_json(t) for t, _ in added.values()]}
-            )
-            self._published.update({u: state for u, (_, state) in added.items()})
-
+        added = {u: d for u, d in desired.items() if u not in published}
         moved: dict[bytes, tuple[Vec3, Quat]] = {}
-        for uuid, (_, state) in desired.items():
-            last = self._published[uuid].pose
-            if uuid in added or state.pose is None or last is None:
-                continue
-            if _pose_moved(state.pose, last):
-                moved[uuid] = state.pose
+        for uuid, state in published.items():
+            pose = desired[uuid][1].pose
+            if pose is not None and state.pose is not None and _pose_moved(pose, state.pose):
+                moved[uuid] = pose
+
+        command: dict[str, Any] = {}
+        if removed:
+            command["remove"] = [_uuid_json(uuid) for uuid in removed]
+        if added:
+            command["add"] = [transform_json(t) for t, _ in added.values()]
         if moved:
             # name the whole pose: proto JSON leaves out zero fields, and the
             # store would otherwise keep a stale x when a prop returns to x=0
-            await self._store.do_command(
+            command["update"] = [
                 {
-                    "update": [
-                        {
-                            "uuid": base64.b64encode(uuid).decode(),
-                            "poseInObserverFrame": {
-                                "pose": MessageToDict(pose_proto(*pose))
-                            },
-                            "updatedFields": [_POSE_FIELD],
-                        }
-                        for uuid, pose in moved.items()
-                    ]
+                    **_uuid_json(uuid),
+                    "poseInObserverFrame": {"pose": MessageToDict(pose_proto(*pose))},
+                    "updatedFields": [_POSE_FIELD],
                 }
-            )
-            for uuid, pose in moved.items():
-                self._published[uuid].pose = pose
+                for uuid, pose in moved.items()
+            ]
+        if command:
+            await self._store.do_command(command)
+
+        # only now that the store has taken it
+        published.update({u: state for u, (_, state) in added.items()})
+        for uuid, pose in moved.items():
+            published[uuid] = _Published(published[uuid].signature, pose)
+        self._published = published
+        self._needs_reconcile = False
