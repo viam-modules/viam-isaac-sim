@@ -63,13 +63,36 @@ Attributes:
                                        "mass" (kg, dynamic props),
                                        "buoyancy": true | {...} (the prop floats
                                        on the world's water; see
-                                       bodies.BuoyancySpec for the block)}
+                                       bodies.BuoyancySpec for the block),
+                                       "world_state" (bool) and "collider":
+                                       see the world state store below}
   water (object)                    - a flat water surface for floating props:
                                       {"level_m": 0, "size_m": 400,
                                       "depth_m": 10, "color": [r,g,b]}. Replaces
                                       the default ground plane with a visual
                                       surface (no collision) and a seabed
                                       collider depth_m below it
+  world_state_store (string)        - name of a world state store service to
+                                      publish props to, default
+                                      "world_state_store" (the name rdk gives
+                                      an unnamed one). Without that service in
+                                      the machine config nothing is published
+  world_state_sync_hz (float)       - how often prop poses are sent, default 5
+  world_state_render (string)       - "colliders" (default): each prop is a
+                                      box, sphere or capsule. "both": usd props
+                                      also publish their mesh. "models": as
+                                      "both", with the primitive hidden
+
+World state store: props and add_usd prims are not in the frame system. When
+the machine has a world state store, the world keeps one transform per prop in
+it, named after the prop, in the "world" frame, following the prop as it
+moves. Set "world_state": false on a prop to leave it out (the default for
+"from_toggler" props, which mirror frame system geometry). A cube prop is
+published as its box. A usd prop is published as a box around its bounds, or
+as its "collider", in meters:
+  {"type": "box", "size": [x, y, z]} | {"type": "sphere", "radius": r} |
+  {"type": "capsule", "radius": r, "length": l}, each with an optional
+  "center": [x, y, z] offset from the prop's origin.
 
 DoCommand:
   {"command": "status"} | {"command": "play"} | {"command": "pause"} |
@@ -93,7 +116,7 @@ DoCommand:
    "upload": {"dataset_id": "...", "tags": ["..."],
               "cosmos_path": "runs/demo/cosmoswriter/000042"}} |
   {"command": "add_usd", "usd_path": "...", "prim_path": "/World/thing",
-   "position": [x, y, z]}
+   "position": [x, y, z], "world_state": true, "collider": {...}}
 """
 
 import asyncio
@@ -103,11 +126,13 @@ from pathlib import Path
 from typing import ClassVar, Self
 
 from viam.components.generic import Generic
+from viam.logging import getLogger
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import ResourceName
 from viam.resource.base import ResourceBase
 from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
+from viam.services.worldstatestore import WorldStateStore
 from viam.utils import ValueTypes, struct_to_dict
 
 from .. import FAMILY, NAMESPACE
@@ -121,10 +146,24 @@ from ..sim_manager import (
     validate_kit_settings,
     validate_rendering_dt,
 )
+from ..world_state import (
+    DEFAULT_STORE_NAME,
+    DEFAULT_SYNC_HZ,
+    RENDER_MODES,
+    WorldStateSync,
+)
+
+LOGGER = getLogger("viam-isaac-sim.world")
 
 
 class IsaacWorld(Generic, EasyResource):
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "world")
+
+    _world_state: WorldStateSync | None = None
+    # (store, hz, render) of the running sync
+    _world_state_settings: tuple | None = None
+    # the newest link in a chain of sync changeovers, each waiting on the last
+    _world_state_swap: asyncio.Task | None = None
 
     @classmethod
     def new(
@@ -146,6 +185,7 @@ class IsaacWorld(Generic, EasyResource):
             "boot_timeout_sec",
             "livestream_width",
             "livestream_height",
+            "world_state_sync_hz",
         ):
             if key in attrs:
                 value = float(attrs[key])
@@ -176,7 +216,13 @@ class IsaacWorld(Generic, EasyResource):
                 raise ValueError("camera_idle_sec must be 0 (off) or >= 0.5")
         if "kit_settings" in attrs:
             validate_kit_settings(attrs["kit_settings"])
-        return [], []
+        if attrs.get("world_state_render", "colliders") not in RENDER_MODES:
+            raise ValueError(f"world_state_render must be one of {list(RENDER_MODES)}")
+        store = attrs.get("world_state_store", DEFAULT_STORE_NAME)
+        if not isinstance(store, str) or not store:
+            raise ValueError("world_state_store must be the name of a service")
+        # optional: the world runs the same without a store in the config
+        return [], [store]
 
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
@@ -209,7 +255,88 @@ class IsaacWorld(Generic, EasyResource):
             isaac_default_environment=bool(attrs.get("isaac_default_environment", True)),
             water=dict(attrs["water"]) if attrs.get("water") is not None else None,
         )
-        SimManager.get().ensure_booted(cfg)
+        sim = SimManager.get()
+        sim.ensure_booted(cfg)
+        self._sync_world_state(attrs, dependencies, sim)
+
+    def _sync_world_state(
+        self,
+        attrs: Mapping[str, ValueTypes],
+        dependencies: Mapping[ResourceName, ResourceBase],
+        sim: SimManager,
+    ) -> None:
+        """Publish props to the configured world state store, if the machine
+        has it. Called on every reconfigure, so the store can come and go."""
+        store_name = str(attrs.get("world_state_store", DEFAULT_STORE_NAME))
+        store = next(
+            (
+                resource
+                for name, resource in dependencies.items()
+                if isinstance(resource, WorldStateStore) and name.name == store_name
+            ),
+            None,
+        )
+        hz = float(attrs.get("world_state_sync_hz", DEFAULT_SYNC_HZ))
+        render = str(attrs.get("world_state_render", "colliders"))
+        settings = (store, hz, render) if store is not None else None
+        current = self._world_state_settings
+        # the store by identity: a rebuilt one is a new client, even if it
+        # compares or hashes like the old
+        if (settings is None and current is None) or (
+            settings is not None
+            and current is not None
+            and settings[0] is current[0]
+            and settings[1:] == current[1:]
+        ):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            if store is not None:
+                LOGGER.warning("no event loop; not syncing props to %r", store_name)
+            return
+        previous, self._world_state = self._world_state, None
+        self._world_state_settings = settings
+        replacement: WorldStateSync | None = None
+        if store is not None:
+            include_meshes = render != "colliders"
+            replacement = self._world_state = WorldStateSync(
+                store,
+                lambda: sim.world_state_obstacles(include_meshes),
+                self.name,
+                hz,
+                render,
+            )
+            LOGGER.info("publishing props to world state store %r", store_name)
+
+        earlier = self._world_state_swap
+
+        async def swap() -> None:
+            # One changeover at a time, in order: reconfigures can arrive
+            # faster than a sync takes to stop, and an old sync clearing the
+            # store must never run after a newer one has filled it.
+            if earlier is not None:
+                await asyncio.wait([earlier])
+            try:
+                if previous is not None:
+                    await previous.stop()
+                # a later reconfigure, or close, may have replaced it already
+                if replacement is not None and self._world_state is replacement:
+                    replacement.start()
+            except Exception:
+                LOGGER.exception("could not change the world state sync")
+
+        self._world_state_swap = loop.create_task(swap())
+
+    async def close(self) -> None:
+        sync, self._world_state = self._world_state, None
+        self._world_state_settings = None
+        swap, self._world_state_swap = self._world_state_swap, None
+        if swap is not None:
+            # let pending changeovers finish; none will start a sync now
+            await asyncio.wait([swap])
+        if sync is not None:
+            await sync.stop()
 
     @staticmethod
     async def _wait_for_trainable_stage(sim: SimManager) -> None:
@@ -231,7 +358,15 @@ class IsaacWorld(Generic, EasyResource):
         sim = SimManager.get()
         cmd = str(command.get("command", ""))
         if cmd == "status":
-            return sim.status()
+            status = sim.status()
+            sync = self._world_state
+            if sync is not None:
+                status["world_state"] = {
+                    "store": sync.store_name,
+                    "transforms": sync.published_count,
+                    "last_error": sync.last_error,
+                }
+            return status
         if cmd == "play":
             sim.play()
             return {"ok": True}
@@ -343,7 +478,11 @@ class IsaacWorld(Generic, EasyResource):
                 raise ValueError("add_usd requires usd_path and prim_path")
             position = command.get("position") or [0.0, 0.0, 0.0]
             sim.add_usd_reference(
-                usd_path, prim_path, tuple(float(v) for v in position)
+                usd_path,
+                prim_path,
+                tuple(float(v) for v in position),
+                world_state=bool(command.get("world_state", True)),
+                collider=command.get("collider"),
             )
             return {"ok": True}
         raise ValueError(
