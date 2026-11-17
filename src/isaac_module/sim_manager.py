@@ -2595,7 +2595,9 @@ class SimManager:
 
     def world_state_obstacles(self, include_meshes: bool = False) -> list[Obstacle]:
         """Every prop and add_usd prim flagged for the world state store, with
-        its current pose. One hop to the sim thread for all of them."""
+        its current pose. include_meshes returns the same props, each usd one
+        carrying its mesh as well as its collider. One hop to the sim thread
+        for all of them."""
         self._require_booted()
 
         def read() -> list[Obstacle]:

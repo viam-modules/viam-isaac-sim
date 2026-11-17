@@ -76,7 +76,8 @@ Attributes:
                                       publish props to, default
                                       "world_state_store" (the name rdk gives
                                       an unnamed one). Without that service in
-                                      the machine config nothing is published
+                                      the machine config nothing is published;
+                                      "" turns publishing off
   world_state_sync_hz (float)       - how often prop poses are sent, default 5
   world_state_render (string)       - "colliders" (default): each prop is a
                                       box, sphere or capsule. "both": usd props
@@ -93,6 +94,7 @@ as its "collider", in meters:
   {"type": "box", "size": [x, y, z]} | {"type": "sphere", "radius": r} |
   {"type": "capsule", "radius": r, "length": l}, each with an optional
   "center": [x, y, z] offset from the prop's origin.
+With world_state_render "both" or "models", a usd prop publishes its mesh too.
 
 DoCommand:
   {"command": "status"} | {"command": "play"} | {"command": "pause"} |
@@ -122,6 +124,7 @@ DoCommand:
 import asyncio
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Self
 
@@ -156,12 +159,31 @@ from ..world_state import (
 LOGGER = getLogger("viam-isaac-sim.world")
 
 
+@dataclass(frozen=True)
+class _SyncSettings:
+    """What a world state sync was started with."""
+
+    store: WorldStateStore
+    hz: float
+    render: str
+
+    def same_as(self, other: "_SyncSettings | None") -> bool:
+        # the store by identity: a rebuilt one is a new client, even if it
+        # compares or hashes like the old
+        return (
+            other is not None
+            and self.store is other.store
+            and self.hz == other.hz
+            and self.render == other.render
+        )
+
+
 class IsaacWorld(Generic, EasyResource):
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "world")
 
     _world_state: WorldStateSync | None = None
-    # (store, hz, render) of the running sync
-    _world_state_settings: tuple | None = None
+    # what the running sync was started with
+    _world_state_settings: _SyncSettings | None = None
     # the newest link in a chain of sync changeovers, each waiting on the last
     _world_state_swap: asyncio.Task | None = None
 
@@ -219,10 +241,13 @@ class IsaacWorld(Generic, EasyResource):
         if attrs.get("world_state_render", "colliders") not in RENDER_MODES:
             raise ValueError(f"world_state_render must be one of {list(RENDER_MODES)}")
         store = attrs.get("world_state_store", DEFAULT_STORE_NAME)
-        if not isinstance(store, str) or not store:
-            raise ValueError("world_state_store must be the name of a service")
+        if not isinstance(store, str):
+            raise ValueError(
+                'world_state_store must be the name of a service, or "" to '
+                "publish nothing"
+            )
         # optional: the world runs the same without a store in the config
-        return [], [store]
+        return [], [store] if store else []
 
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
@@ -265,8 +290,11 @@ class IsaacWorld(Generic, EasyResource):
         dependencies: Mapping[ResourceName, ResourceBase],
         sim: SimManager,
     ) -> None:
-        """Publish props to the configured world state store, if the machine
-        has it. Called on every reconfigure, so the store can come and go."""
+        """Start the background task that keeps publishing props to the
+        configured world state store, if the machine has it. Called on every
+        reconfigure, so the store can come and go; a changed setting replaces
+        the running task."""
+        # "" turns publishing off: no resource has that name
         store_name = str(attrs.get("world_state_store", DEFAULT_STORE_NAME))
         store = next(
             (
@@ -278,16 +306,12 @@ class IsaacWorld(Generic, EasyResource):
         )
         hz = float(attrs.get("world_state_sync_hz", DEFAULT_SYNC_HZ))
         render = str(attrs.get("world_state_render", "colliders"))
-        settings = (store, hz, render) if store is not None else None
+        settings = _SyncSettings(store, hz, render) if store is not None else None
         current = self._world_state_settings
-        # the store by identity: a rebuilt one is a new client, even if it
-        # compares or hashes like the old
-        if (settings is None and current is None) or (
-            settings is not None
-            and current is not None
-            and settings[0] is current[0]
-            and settings[1:] == current[1:]
-        ):
+        unchanged = (
+            settings.same_as(current) if settings is not None else current is None
+        )
+        if unchanged:
             return
         try:
             loop = asyncio.get_running_loop()

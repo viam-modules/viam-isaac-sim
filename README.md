@@ -198,8 +198,8 @@ overrides orientation to aim at a point.
 | `kit_settings` | `{}` | carb settings applied at boot, e.g. `{"/rtx/reflections/enabled": false}`. Keys are carb paths starting with `/` whose segments use letters, digits, `_`, `.` or `-`; values are bools, numbers or strings (strings can't contain spaces or `=`), and override `render_quality`. Each is logged with its value before and after, and unknown paths are warned about |
 | `camera_idle_sec` | `0` (off) | `0` or at least `0.5`. Stop rendering a camera nobody has read for this many seconds. An unread 1280×720 camera costs about 9% step time. The next read waits for a fresh rendered frame. Cameras recording an episode never pause, and paused cameras are resumed before an episode starts |
 | `water` | _none_ | `{"level_m": 0, "size_m": 400, "depth_m": 10, "color": [r,g,b]}`: a flat water surface for floating props. Replaces the default ground plane with a visual surface (no collision) at `level_m` and a seabed collider `depth_m` below it |
-| `world_state_store` | `"world_state_store"` | name of a world state store service to publish props to; see [World state store](#world-state-store). Nothing is published unless that service is in the machine config |
-| `world_state_sync_hz` | `5` | how often prop poses are sent to the store |
+| `world_state_store` | `"world_state_store"` | name of a world state store service to publish props to; see [World state store](#world-state-store). Nothing is published unless that service is in the machine config; `""` turns publishing off |
+| `world_state_sync_hz` | `5` | how often prop poses are sent to the store. The world logs a warning when syncs keep taking more than half of that period |
 | `world_state_render` | `"colliders"` | `"colliders"`: each prop is published as a box, sphere or capsule. `"both"`: `usd` props also publish their mesh. `"models"`: as `"both"`, with the primitive hidden by default |
 
 `{"command": "status"}` also reports `perf`, a rolling 2-second window of `real_time_factor`, `step_ms`, `loop_ms` and `render_hz`, plus `perf_totals` (cumulative counters since boot) and the effective `settings`. To measure a change, use `examples/bench_sweep.py`. It records an episode on both cameras while sweeping the arm's base joint for a fixed time, and prints whole-run averages over playing loops:
@@ -247,7 +247,8 @@ world state store to the machine config and the world keeps them in it:
 ```
 
 The world finds a store named `world_state_store` on its own. For a store with
-another name, set the world's `world_state_store` attribute to it.
+another name, set the world's `world_state_store` attribute to it. To keep the
+world from publishing to a store the machine has, set it to `""`.
 
 Each prop becomes one transform in the `world` frame, named after the prop. Its
 pose is re-sent whenever the prop moves, checked `world_state_sync_hz` times a

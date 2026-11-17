@@ -3,9 +3,11 @@ sync loop run against an in-memory stand-in for rdk's builtin store."""
 
 import asyncio
 import base64
+import itertools
 import json
 import math
 import threading
+import time
 
 import pytest
 from google.protobuf.json_format import ParseDict
@@ -295,6 +297,8 @@ def test_sync_removes_props_that_go_away_and_readds_changed_geometry():
         assert store.by_frame()["block"].physical_object.HasField("sphere")
         assert store.calls[-1] == ["remove", "add"]
 
+    asyncio.run(scenario())
+
 
 def test_one_tick_is_one_call_and_a_rejected_call_is_retried_whole():
     async def scenario():
@@ -316,8 +320,6 @@ def test_one_tick_is_one_call_and_a_rejected_call_is_retried_whole():
             await sync.sync_once()
         assert set(store.by_frame()) == {"pad", "new"}
         assert sync.published_count == 3  # nothing recorded as sent
-
-    asyncio.run(scenario())
 
     asyncio.run(scenario())
 
@@ -452,6 +454,72 @@ async def _until(condition, timeout: float = 5.0) -> None:
         await asyncio.sleep(0.01)
 
 
+def _slow_snapshot(obstacles, seconds: float, starts: list[float]):
+    """A snapshot that takes a while, as a busy sim thread would, and notes
+    when each one began."""
+
+    def snapshot():
+        starts.append(time.monotonic())
+        time.sleep(seconds)
+        return list(obstacles)
+
+    return snapshot
+
+
+def test_ticks_start_a_period_apart_however_long_they_take():
+    async def scenario():
+        starts: list[float] = []
+        # 30 ms of work in a 50 ms period
+        sync = WorldStateSync(
+            FakeStore(),
+            _slow_snapshot([_box("block")], 0.03, starts),
+            "sim-world",
+            hz=20.0,
+        )
+        sync.start()
+        await _until(lambda: len(starts) >= 8)
+        await sync.stop()
+        gaps = [later - earlier for earlier, later in itertools.pairwise(starts)]
+        # sleeping a whole period after the work would make these 80 ms
+        assert sum(gaps) / len(gaps) < 0.065
+
+    asyncio.run(scenario())
+
+
+def test_ticks_that_stay_slow_are_warned_about_once(caplog):
+    def warnings() -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if "between ticks" in r.getMessage()
+        ]
+
+    async def scenario():
+        # 30 ms of work is over half of a 50 ms period, tick after tick
+        starts: list[float] = []
+        sync = WorldStateSync(
+            FakeStore(),
+            _slow_snapshot([_box("block")], 0.03, starts),
+            "sim-world",
+            hz=20.0,
+        )
+        sync.start()
+        await _until(lambda: len(starts) >= 6)
+        await sync.stop()
+        assert len(warnings()) == 1
+        assert "reading the sim" in warnings()[0]
+
+        # one slow tick among quick ones is not worth a line
+        caplog.clear()
+        quick = _sync(FakeStore(), [_box("block")], hz=20.0)
+        for elapsed in (0.001, 0.2, 0.001, 0.2, 0.001):
+            quick._note_duration(elapsed)
+        assert warnings() == []
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(scenario())
+
+
 # ----------------------------------------------------------------------
 # the world component, mock sim
 # ----------------------------------------------------------------------
@@ -506,6 +574,13 @@ def test_validate_config_names_the_store_as_optional():
     assert IsaacWorld.validate_config(
         _config("w", {"world_state_store": "obstacles"})
     ) == ([], ["obstacles"])
+    # "" is off: nothing to depend on
+    assert IsaacWorld.validate_config(_config("w", {"world_state_store": ""})) == (
+        [],
+        [],
+    )
+    with pytest.raises(ValueError, match="world_state_store"):
+        IsaacWorld.validate_config(_config("w", {"world_state_store": 5}))
     with pytest.raises(ValueError, match="world_state_render"):
         IsaacWorld.validate_config(_config("w", {"world_state_render": "meshes"}))
     with pytest.raises(ValueError, match="world_state_sync_hz"):
@@ -632,6 +707,28 @@ def test_world_publishes_props_and_follows_them(sim):
         await _until(lambda: not store.transforms)
         status = await world.do_command({"command": "status"})
         assert "world_state" not in status
+        await world.close()
+
+    asyncio.run(scenario())
+
+
+def test_an_empty_store_name_turns_publishing_off(sim):
+    async def scenario():
+        store = FakeStore()
+        deps = {ResourceName(name="world_state_store"): store}
+        world = IsaacWorld.new(_config("sim-world", WORLD_ATTRS), deps)
+        await _until(lambda: "pick_block" in store.by_frame())
+
+        # the store is still on the machine; the world just stops using it
+        world.reconfigure(
+            _config("sim-world", {**WORLD_ATTRS, "world_state_store": ""}), deps
+        )
+        await _until(lambda: not store.transforms)
+        status = await world.do_command({"command": "status"})
+        assert "world_state" not in status
+        calls = len(store.calls)
+        await asyncio.sleep(0.05)
+        assert len(store.calls) == calls
         await world.close()
 
     asyncio.run(scenario())

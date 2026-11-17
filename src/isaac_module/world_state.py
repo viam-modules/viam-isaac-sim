@@ -20,6 +20,7 @@ import base64
 import hashlib
 import math
 import struct
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -57,6 +58,10 @@ MAX_MESH_BYTES = 4 * 1024 * 1024
 # how often to check that the store still holds what was published: a prop at
 # rest sends nothing, so nothing else would notice the store being emptied
 DEFAULT_VERIFY_S = 2.0
+# a tick that takes more than this share of the time between ticks is slow;
+# ticks that stay slow are warned about, at most this often
+SLOW_TICK_FRACTION = 0.5
+SLOW_WARNING_INTERVAL_S = 60.0
 
 # a pose has to move this far before it is sent again, so physics jitter on a
 # resting prop is not a stream of updates
@@ -374,6 +379,9 @@ class WorldStateSync:
         self._needs_reconcile = True
         self._verify_every = max(1, round(verify_s * hz))
         self._ticks_since_verify = 0
+        self._snapshot_s = 0.0
+        self._slow_ticks = 0
+        self._next_slow_warning = 0.0
         self._task: asyncio.Task | None = None
         self.last_error = ""
 
@@ -392,9 +400,11 @@ class WorldStateSync:
 
     async def run(self) -> None:
         while True:
+            started = time.monotonic()
             try:
                 await self.sync_once()
                 self.last_error = ""
+                self._note_duration(time.monotonic() - started)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -406,7 +416,33 @@ class WorldStateSync:
                         message,
                     )
                 self.last_error = message
-            await asyncio.sleep(self._period_s)
+            # ticks start a period apart, however long each one takes
+            elapsed = time.monotonic() - started
+            await asyncio.sleep(max(0.0, self._period_s - elapsed))
+
+    def _note_duration(self, elapsed_s: float) -> None:
+        """Warn when ticks keep taking too much of the time between them.
+
+        Not for one slow tick: a tick that publishes a new prop measures it,
+        exports its mesh and uploads it, once.
+        """
+        if elapsed_s <= self._period_s * SLOW_TICK_FRACTION:
+            self._slow_ticks = 0
+            return
+        self._slow_ticks += 1
+        now = time.monotonic()
+        if self._slow_ticks < 2 or now < self._next_slow_warning:
+            return
+        self._next_slow_warning = now + SLOW_WARNING_INTERVAL_S
+        LOGGER.warning(
+            "world state sync to %r is slow: %.0f ms a tick (%.0f ms of it "
+            "reading the sim), with %.0f ms between ticks; lower the sync "
+            "rate, or publish fewer props or meshes",
+            self.store_name,
+            elapsed_s * 1000.0,
+            self._snapshot_s * 1000.0,
+            self._period_s * 1000.0,
+        )
 
     async def stop(self) -> None:
         """Stop syncing and take what this sync published out of the store.
@@ -445,7 +481,9 @@ class WorldStateSync:
 
     async def sync_once(self) -> None:
         """Bring the store in line with one snapshot of the sim."""
+        started = time.monotonic()
         obstacles = await asyncio.to_thread(self._snapshot)
+        self._snapshot_s = time.monotonic() - started
         desired: dict[bytes, tuple[Transform, _Published]] = {}
         for obstacle in obstacles:
             pose = (obstacle.position, obstacle.orientation_wxyz)
