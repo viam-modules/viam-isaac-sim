@@ -82,6 +82,8 @@ GRIPPER_HOLD_FORCE_N = 2.0
 _UFACTORY_KINEMATICS = (
     "https://raw.githubusercontent.com/viam-modules/viam-ufactory-xarm/main/arm"
 )
+# USDs this module ships itself, for robots the Isaac content server lacks.
+MODULE_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 VISUAL_MATERIAL_PRESETS: dict[str, dict[str, Any]] = {
     "wood": {
@@ -150,6 +152,15 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         "end_effector_link": "gripper/uflite_gripper_link",
         "variants": {"Variant_Set": "lite_gripper"},
     },
+    # UFACTORY 850 with its Gripper G2 in one articulation, shipped in
+    # assets/uf850_g2 (see its NOTICE.md). The G2's five follower joints are
+    # PhysX mimics of drive_joint, so only drive_joint is driven.
+    "uf850_g2": {
+        "module_usd": "uf850_g2/uf850_g2.usd",
+        "kinematics": f"{_UFACTORY_KINEMATICS}/xarm850_kinematics.json",
+        "joint_names": LITE6_JOINT_NAMES,  # UFACTORY arms share joint1..joint6
+        "end_effector_link": "link6",
+    },
     "franka": {
         "usd": [
             "/Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd",
@@ -185,6 +196,26 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         "drive_damping": 5.0,
         "coupled_drive_joints": ("finger_joint2",),
         "gripper_mode": "binary",
+    },
+    # The G2 inside the uf850_g2 asset. Drive angles span the measured pad gap of
+    # a real G2: 95 mm open to 0 mm closed (UFACTORY's linkage gives
+    # gap = 18 mm + 110 mm * sin(40.15 deg - angle)). The drive's force and speed
+    # caps are authored in the USD from the Viam driver's defaults (~40 N, ~109 mm/s).
+    "g2": {
+        "kind": "gripper",
+        "integrated_arm_asset": "uf850_g2",
+        "joints_on_arm": True,
+        "drive_joint": "drive_joint",
+        "coupled_drive_joints": (),
+        "open_position": -0.074618,
+        "closed_position": 0.865155,
+        "position_unit": "rad",
+        "holding_tolerance": 0.001,
+        "tcp_offset_m": 0.172,
+        "jaw_box_mm": (75.0, 173.0, 167.0),
+        "drive_stiffness": 2000.0,
+        "drive_damping": 100.0,
+        "gripper_mode": "position",
     },
     "jetbot": {
         "usd": [
@@ -2894,6 +2925,8 @@ class SimManager:
                     "(or set usd_path directly)"
                 )
             meta = KNOWN_ASSETS[asset]
+            if not usd and meta.get("module_usd"):
+                usd = str(MODULE_ASSETS_DIR / meta["module_usd"])
             if not usd:
                 root = self._isaac.get_assets_root_path()
                 if root is None:

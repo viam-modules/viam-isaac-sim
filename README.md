@@ -297,6 +297,9 @@ parameterizers. `is_moving_velocity_threshold_rad_s` sets the per-joint velocity
 noise floor used by `IsMoving`; it defaults to `0.01` rad/s and must be finite
 and non-negative. Known UR assets default to `wrist_3_link`; `lite6` selects
 NVIDIA's integrated gripper variant and defaults to its gripper body.
+`uf850_g2` is a UFACTORY 850 with its Gripper G2, shipped with this module
+rather than the Isaac content server (`src/isaac_module/assets/uf850_g2`, with
+its source and license in `NOTICE.md`); it defaults to `link6`, the flange.
 `initial_joint_positions_deg` (known assets, in their joint order) spawns the
 arm at that pose instead of zero joints, and a world `reset` returns it there.
 
@@ -354,7 +357,14 @@ radian state used by policy clients.
 
 `world` and `arm` are required. `lite6_gripper` exposes the gripper already
 composed into NVIDIA's `lite6` asset; `robotiq_2f_85` is mounted under a UR
-wrist and accepts an optional local mount pose.
+wrist and accepts an optional local mount pose. `g2` drives the Gripper G2
+inside the `uf850_g2` arm: 95 mm between the pads open, 0 mm closed, with the
+grip point 172 mm past the flange.
+
+```json
+{"name": "arm", "model": "viam-labs:isaac-sim:arm", "attributes": {"world": "sim-world", "asset": "uf850_g2"}}
+{"name": "gripper", "model": "viam-labs:isaac-sim:gripper", "attributes": {"world": "sim-world", "arm": "arm", "asset": "g2"}}
+```
 
 `sensorless` is an optional boolean, defaulting to `false`. When `false`,
 `IsHolding` retains the simulator's contact/stall detection. When `true`,
