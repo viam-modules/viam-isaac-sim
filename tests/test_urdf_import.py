@@ -1,6 +1,7 @@
 """A `.urdf` usd_path is imported with Isaac's URDF importer into a cached
 USD, and the arm loads that USD."""
 
+import os
 import threading
 from types import SimpleNamespace
 
@@ -99,6 +100,8 @@ def test_a_failed_import_is_not_cached(monkeypatch, tmp_path):
 
     def failing(urdf_path, dest_path, fix_base):
         attempts.append(dest_path)
+        # a retry starts clean: the importer would reopen a half-written stage
+        assert not os.path.exists(dest_path)
         open(dest_path, "w").close()  # the importer creates the stage first
         raise RuntimeError("bad urdf")
 

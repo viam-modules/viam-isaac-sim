@@ -16,6 +16,7 @@ import math
 import os
 import queue
 import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -5814,7 +5815,9 @@ def _import_urdf(urdf: str, fix_base: bool) -> str:
     done = out / ".imported"
     if done.exists():
         return str(usd)
-    out.mkdir(parents=True, exist_ok=True)
+    # the importer reopens layers it finds, so start a retry from scratch
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True)
     LOGGER.info("importing urdf %s -> %s", src, usd)
     _run_urdf_importer(str(src), str(usd), fix_base)
     done.touch()
