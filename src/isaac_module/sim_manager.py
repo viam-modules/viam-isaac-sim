@@ -4584,8 +4584,23 @@ class IsaacArmHandle(ArmHandle):
                 if velocities_before_raw is None
                 else tuple(float(value) for value in velocities_before_raw)
             )
+            nudge = self._nudge or [0.0] * len(current)
+            held = [value - offset for value, offset in zip(current, nudge)]
+            # An arm that already reached its target keeps it: a drive jittering
+            # around the target would otherwise latch a jitter sample as the
+            # new hold pose (the RDK calls Stop after every move).
+            if (
+                self._target is not None
+                and self._trajectory_future is None
+                and all(
+                    abs(h - t) <= STOP_KEEPS_TARGET_WITHIN_RAD
+                    for h, t in zip(held, self._target)
+                )
+            ):
+                held = list(self._target)
+            hold = [h + offset for h, offset in zip(held, nudge)]
             action = self._sim._isaac.ArticulationAction(
-                joint_positions=np.asarray(current, dtype=float),
+                joint_positions=np.asarray(hold, dtype=float),
                 joint_indices=self._joint_indices,
             )
             self._art.apply_action(action)
@@ -4650,8 +4665,7 @@ class IsaacArmHandle(ArmHandle):
 
             self._sim._step_callbacks[trace_name] = _trace_stop
             # The measured pose includes any active nudge; keep the target clean.
-            nudge = self._nudge or [0.0] * len(current)
-            self._target = [value - offset for value, offset in zip(current, nudge)]
+            self._target = held
             self._commanded = list(self._target)
             if self._trajectory_future is not None:
                 self._trajectory_future.cancel()
@@ -5810,6 +5824,9 @@ def asset_cache_dir() -> Path:
     return Path(base) / ASSET_CACHE_DIRNAME
 
 
+# ponytail: fixed band; Mabel's torso jitters ~1.2 deg around a reached
+# target. Make it per-arm (path_tolerance_delta_deg) if a real arm needs tighter.
+STOP_KEEPS_TARGET_WITHIN_RAD = math.radians(2.0)
 URDF_IMPORT_VERSION = 1
 # a cold import of a big robot (Mabel: ~150 meshes) takes minutes, longer than
 # the 120 s spawn budget, so it gets its own

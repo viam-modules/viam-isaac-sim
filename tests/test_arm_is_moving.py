@@ -273,6 +273,35 @@ def test_stopping_trajectory_cancels_callback_and_stops_at_measured_position():
     assert handle.is_moving() is False
 
 
+def test_stop_after_arriving_keeps_the_reached_target():
+    """A drive jittering around its reached target (Mabel's torso: +-1 deg at
+    several rad/s) must not have Stop latch a jitter sample as the new hold
+    target - the RDK calls Stop after every MoveToJointPositions session."""
+    sim = _FakeSim()
+    art = _FakeArt([0.0])
+    handle = IsaacArmHandle(sim, art, None, "/World/arm")
+    handle.set_joint_targets([-0.5236])
+    art.positions = [-0.5038]  # jitter sample, 1.1 deg off
+    art._vels = [-4.18]
+
+    handle.stop_trajectory()
+
+    assert art.actions[-1].joint_positions == pytest.approx([-0.5236])
+    assert handle.is_moving() is False
+
+
+def test_stop_mid_move_still_holds_where_the_arm_is():
+    sim = _FakeSim()
+    art = _FakeArt([0.0])
+    handle = IsaacArmHandle(sim, art, None, "/World/arm")
+    handle.set_joint_targets([-0.5236])
+    art.positions = [-0.2]
+
+    handle.stop_trajectory()
+
+    assert art.actions[-1].joint_positions == pytest.approx([-0.2])
+
+
 def test_streamed_request_cancellation_stops_active_trajectory():
     class Handle:
         def __init__(self):
