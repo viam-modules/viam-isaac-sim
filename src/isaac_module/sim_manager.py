@@ -2941,6 +2941,8 @@ class SimManager:
                         f"asset {asset!r}: none of {candidates} exist under {root}; "
                         "the asset layout may have changed in this isaac release"
                     )
+        if usd and usd.lower().endswith(".urdf"):
+            usd = _import_urdf(usd, bool(attrs.get("urdf_fix_base", False)))
         # a USD reference to a missing file "succeeds" but leaves an empty
         # prim, which later fails with confusing physics-tensor errors -
         # catch it here instead
@@ -5796,6 +5798,67 @@ def _is_layer_path(asset_path: str) -> bool:
 def asset_cache_dir() -> Path:
     base = os.environ.get("VIAM_MODULE_DATA") or tempfile.gettempdir()
     return Path(base) / ASSET_CACHE_DIRNAME
+
+
+URDF_IMPORT_VERSION = 1
+
+
+def _import_urdf(urdf: str, fix_base: bool) -> str:
+    """Import a URDF with Isaac's importer into a USD in the asset cache and
+    return its path. Cached by the URDF's bytes and the import config; edits
+    to the meshes it references need a URDF change (or a cleared cache)."""
+    src = Path(urdf).resolve()
+    key = src.read_bytes() + f"|fix_base={fix_base}|v{URDF_IMPORT_VERSION}".encode()
+    out = asset_cache_dir() / f"urdf-{src.stem}-{hashlib.sha1(key).hexdigest()[:12]}"
+    usd = out / f"{src.stem}.usd"
+    done = out / ".imported"
+    if done.exists():
+        return str(usd)
+    out.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("importing urdf %s -> %s", src, usd)
+    _run_urdf_importer(str(src), str(usd), fix_base)
+    done.touch()
+    return str(usd)
+
+
+def _run_urdf_importer(urdf_path: str, dest_path: str, fix_base: bool) -> None:
+    """Isaac's URDF importer, writing dest_path (5.x also writes a
+    configuration/ folder beside it). Meshes resolve against the URDF's
+    directory. Position drives keep the importer's gains: stiffness from a
+    25 rad/s natural frequency, damping from the URDF's <dynamics damping>
+    (0 when absent), effort limits as max force."""
+    try:
+        from isaacsim.core.utils.extensions import enable_extension
+    except ImportError:
+        from omni.isaac.core.utils.extensions import enable_extension
+    for ext in ("isaacsim.asset.importer.urdf", "omni.importer.urdf"):
+        if enable_extension(ext):
+            break
+    import omni.kit.commands
+
+    try:
+        from isaacsim.asset.importer.urdf import _urdf
+    except ImportError:
+        from omni.importer.urdf import _urdf
+
+    _, cfg = omni.kit.commands.execute("URDFCreateImportConfig")
+    cfg.fix_base = fix_base
+    cfg.self_collision = False
+    # cameras and fixed_base_link address links by prim path, so keep them
+    cfg.merge_fixed_joints = False
+    cfg.import_inertia_tensor = True
+    cfg.distance_scale = 1.0
+    cfg.create_physics_scene = False
+    cfg.make_default_prim = True
+    cfg.default_drive_type = _urdf.UrdfJointTargetType.JOINT_DRIVE_POSITION
+    ok, prim = omni.kit.commands.execute(
+        "URDFParseAndImportFile",
+        urdf_path=urdf_path,
+        import_config=cfg,
+        dest_path=dest_path,
+    )
+    if not ok or not prim:
+        raise RuntimeError(f"isaac could not import urdf {urdf_path}")
 
 
 def _bucket_candidate(asset_path: str, assets_root: str) -> str | None:

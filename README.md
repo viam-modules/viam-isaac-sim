@@ -303,6 +303,15 @@ its source and license in `NOTICE.md`); it defaults to `link6`, the flange.
 `initial_joint_positions_deg` (known assets, in their joint order) spawns the
 arm at that pose instead of zero joints, and a world `reset` returns it there.
 
+`usd_path` can also point at a `.urdf`: the module imports it with Isaac's
+URDF importer into a USD in its data directory (`VIAM_MODULE_DATA`), cached by
+the URDF's contents, and loads that. Mesh paths resolve relative to the URDF
+file. Links stay separate prims under `prim_path` (fixed joints are not
+merged), self-collision is off, and joints get position drives with the
+importer's default gains (stiffness from a 25 rad/s natural frequency, damping
+from the URDF's `<dynamics damping>`). The root floats unless
+`urdf_fix_base: true`; `fixed_base_link` pins any link instead.
+
 `joint_names` (optional, non-empty list of unique strings) names the
 articulation DOFs this arm drives, in order. It overrides a known asset's
 joints; without it a custom `usd_path`/`prim_path` arm drives every DOF. Names

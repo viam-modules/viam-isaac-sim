@@ -3,7 +3,10 @@
 Attributes:
   world (string, required)         - name of the viam-labs:isaac-sim:world component
   asset (string)                   - known robot, e.g. "lite6", "ur20", "ur10", "franka"
-  usd_path (string)                - explicit USD to spawn instead of a known asset
+  usd_path (string)                - explicit USD to spawn instead of a known asset;
+                                     a .urdf is imported with Isaac's URDF importer
+  urdf_fix_base (bool)             - for a .urdf usd_path, fix its root link to the
+                                     world on import (default false)
   prim_path (string)               - where to place it (default /World/<name>), or
                                      an existing articulation in the stage
   position ([x,y,z] meters)        - spawn position
