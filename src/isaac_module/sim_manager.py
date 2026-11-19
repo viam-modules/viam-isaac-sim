@@ -2943,7 +2943,9 @@ class SimManager:
                         "the asset layout may have changed in this isaac release"
                     )
         if usd and usd.lower().endswith(".urdf"):
-            usd = _import_urdf(usd, bool(attrs.get("urdf_fix_base", False)))
+            usd = _import_urdf(
+                usd, bool(attrs.get("urdf_fix_base", False)), _urdf_drive(attrs)
+            )
         # a USD reference to a missing file "succeeds" but leaves an empty
         # prim, which later fails with confusing physics-tensor errors -
         # catch it here instead
@@ -2951,13 +2953,20 @@ class SimManager:
             raise ValueError(f"usd not found: {usd}")
         return usd, meta
 
+    def _spawn(self, attrs: dict[str, Any], create: Callable[[], Any]) -> Any:
+        """Run a spawn on the sim thread within 120 s. A URDF usd_path is
+        imported first, under its own budget, so the spawn hits the cache."""
+        if str(attrs.get("usd_path") or "").lower().endswith(".urdf"):
+            self.run(lambda: self._resolve_usd(attrs), timeout=URDF_IMPORT_TIMEOUT_S)
+        return self.run(create, timeout=120.0)
+
     def create_arm(self, name: str, attrs: dict[str, Any]) -> "ArmHandle":
         self._require_booted()
         if self.mock:
             factory = lambda: MockArmHandle(self, name, attrs)
         else:
-            factory = lambda: self.run(
-                lambda: self._create_arm_isaac(name, attrs), timeout=120.0
+            factory = lambda: self._spawn(
+                attrs, lambda: self._create_arm_isaac(name, attrs)
             )
         return self._cached_handle("arm", name, attrs, factory)
 
@@ -3149,11 +3158,11 @@ class SimManager:
                 )
             )
         else:
-            factory = lambda: self.run(
+            factory = lambda: self._spawn(
+                gripper_attrs,
                 lambda: self._create_gripper_isaac(
                     name, gripper_attrs, arm_attrs, arm_handle
                 ),
-                timeout=120.0,
             )
         return self._cached_handle("gripper", name, gripper_attrs, factory)
 
@@ -3760,8 +3769,8 @@ class SimManager:
         if self.mock:
             factory = lambda: MockBaseHandle(name, attrs)
         else:
-            factory = lambda: self.run(
-                lambda: self._create_base_isaac(name, attrs), timeout=120.0
+            factory = lambda: self._spawn(
+                attrs, lambda: self._create_base_isaac(name, attrs)
             )
         return self._cached_handle("base", name, attrs, factory)
 
@@ -5802,14 +5811,40 @@ def asset_cache_dir() -> Path:
 
 
 URDF_IMPORT_VERSION = 1
+# a cold import of a big robot (Mabel: ~150 meshes) takes minutes, longer than
+# the 120 s spawn budget, so it gets its own
+URDF_IMPORT_TIMEOUT_S = 900.0
+# critically damped and stiff enough to hold a humanoid's torso against gravity;
+# the importer's own default (25 rad/s, damping from <dynamics>) sags
+URDF_DRIVE_DEFAULT = {"natural_frequency": 100.0, "damping_ratio": 1.0}
 
 
-def _import_urdf(urdf: str, fix_base: bool) -> str:
+def _urdf_drive(attrs: dict[str, Any]) -> tuple[float, float]:
+    """(natural_frequency rad/s, damping_ratio) from the `urdf_drive` attribute."""
+    drive = attrs.get("urdf_drive") or {}
+    if not isinstance(drive, Mapping) or set(drive) - set(URDF_DRIVE_DEFAULT):
+        raise ValueError(
+            f"urdf_drive must be an object with keys {sorted(URDF_DRIVE_DEFAULT)}"
+        )
+    nf, zeta = ({**URDF_DRIVE_DEFAULT, **drive}[k] for k in URDF_DRIVE_DEFAULT)
+    try:
+        nf, zeta = float(nf), float(zeta)
+    except (TypeError, ValueError):
+        raise ValueError("urdf_drive values must be numbers") from None
+    if not (math.isfinite(nf) and nf > 0 and math.isfinite(zeta) and zeta >= 0):
+        raise ValueError(
+            "urdf_drive needs natural_frequency > 0 and damping_ratio >= 0"
+        )
+    return nf, zeta
+
+
+def _import_urdf(urdf: str, fix_base: bool, drive: tuple[float, float]) -> str:
     """Import a URDF with Isaac's importer into a USD in the asset cache and
     return its path. Cached by the URDF's bytes and the import config; edits
     to the meshes it references need a URDF change (or a cleared cache)."""
     src = Path(urdf).resolve()
-    key = src.read_bytes() + f"|fix_base={fix_base}|v{URDF_IMPORT_VERSION}".encode()
+    config = f"|fix_base={fix_base}|drive={drive}|v{URDF_IMPORT_VERSION}"
+    key = src.read_bytes() + config.encode()
     out = asset_cache_dir() / f"urdf-{src.stem}-{hashlib.sha1(key).hexdigest()[:12]}"
     usd = out / f"{src.stem}.usd"
     done = out / ".imported"
@@ -5819,17 +5854,40 @@ def _import_urdf(urdf: str, fix_base: bool) -> str:
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     LOGGER.info("importing urdf %s -> %s", src, usd)
-    _run_urdf_importer(str(src), str(usd), fix_base)
+    started = time.monotonic()
+    _run_urdf_importer(str(src), str(usd), fix_base, drive)
     done.touch()
+    LOGGER.info("imported urdf %s in %.1fs", src.name, time.monotonic() - started)
     return str(usd)
 
 
-def _run_urdf_importer(urdf_path: str, dest_path: str, fix_base: bool) -> None:
+def _set_urdf_drives(
+    urdf: Any, interface: Any, robot: Any, natural_frequency: float, damping_ratio: float
+) -> None:
+    """Position-drive gains for every joint, with the importer UI's math:
+    stiffness = compute_natural_stiffness (nf^2, times joint inertia for force
+    drives), damping = 2 * m_eq * nf * damping_ratio (m_eq = 1, or the joint
+    inertia for force drives)."""
+    joints = robot.joints  # a copy: written back below
+    for name, joint in joints.items():
+        drive = joint.drive
+        if drive.target_type != urdf.UrdfJointTargetType.JOINT_DRIVE_POSITION:
+            continue
+        force = drive.drive_type == urdf.UrdfJointDriveType.JOINT_DRIVE_FORCE
+        m_eq = joint.inertia if force else 1.0
+        drive.natural_frequency = natural_frequency
+        drive.damping_ratio = damping_ratio
+        drive.strength = interface.compute_natural_stiffness(robot, name, natural_frequency)
+        drive.damping = 2 * m_eq * natural_frequency * damping_ratio
+    robot.joints = joints
+
+
+def _run_urdf_importer(
+    urdf_path: str, dest_path: str, fix_base: bool, drive: tuple[float, float]
+) -> None:
     """Isaac's URDF importer, writing dest_path (5.x also writes a
     configuration/ folder beside it). Meshes resolve against the URDF's
-    directory. Position drives keep the importer's gains: stiffness from a
-    25 rad/s natural frequency, damping from the URDF's <dynamics damping>
-    (0 when absent), effort limits as max force."""
+    directory; URDF effort limits become drive max forces."""
     try:
         from isaacsim.core.utils.extensions import enable_extension
     except ImportError:
@@ -5854,9 +5912,14 @@ def _run_urdf_importer(urdf_path: str, dest_path: str, fix_base: bool) -> None:
     cfg.create_physics_scene = False
     cfg.make_default_prim = True
     cfg.default_drive_type = _urdf.UrdfJointTargetType.JOINT_DRIVE_POSITION
+    _, robot = omni.kit.commands.execute(
+        "URDFParseFile", urdf_path=urdf_path, import_config=cfg
+    )
+    _set_urdf_drives(_urdf, _urdf.acquire_urdf_interface(), robot, *drive)
     ok, prim = omni.kit.commands.execute(
-        "URDFParseAndImportFile",
+        "URDFImportRobot",
         urdf_path=urdf_path,
+        urdf_robot=robot,
         import_config=cfg,
         dest_path=dest_path,
     )

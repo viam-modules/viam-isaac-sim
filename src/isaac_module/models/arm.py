@@ -7,6 +7,9 @@ Attributes:
                                      a .urdf is imported with Isaac's URDF importer
   urdf_fix_base (bool)             - for a .urdf usd_path, fix its root link to the
                                      world on import (default false)
+  urdf_drive (object)              - for a .urdf usd_path, joint drive gains:
+                                     {"natural_frequency": rad/s (default 100),
+                                      "damping_ratio": (default 1.0, critical)}
   prim_path (string)               - where to place it (default /World/<name>), or
                                      an existing articulation in the stage
   position ([x,y,z] meters)        - spawn position

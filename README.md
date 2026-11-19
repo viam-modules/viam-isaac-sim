@@ -307,10 +307,15 @@ arm at that pose instead of zero joints, and a world `reset` returns it there.
 URDF importer into a USD in its data directory (`VIAM_MODULE_DATA`), cached by
 the URDF's contents, and loads that. Mesh paths resolve relative to the URDF
 file. Links stay separate prims under `prim_path` (fixed joints are not
-merged), self-collision is off, and joints get position drives with the
-importer's default gains (stiffness from a 25 rad/s natural frequency, damping
-from the URDF's `<dynamics damping>`). The root floats unless
-`urdf_fix_base: true`; `fixed_base_link` pins any link instead.
+merged), self-collision is off, and joints get position drives tuned like the
+importer's joint panel: `urdf_drive: {"natural_frequency": 100,
+"damping_ratio": 1.0}` by default (rad/s; stiffness = natural_frequency², or
+times the joint inertia for force drives; damping = 2 × natural_frequency ×
+damping_ratio, so 1.0 is critically damped). The importer's own default (25
+rad/s, damping from `<dynamics damping>`) lets a humanoid torso sag. URDF
+effort limits cap the drive force. The root floats unless `urdf_fix_base:
+true`; `fixed_base_link` pins any link instead. The first import of a large
+robot can take minutes; it is cached, so later starts are fast.
 
 `joint_names` (optional, non-empty list of unique strings) names the
 articulation DOFs this arm drives, in order. It overrides a known asset's
