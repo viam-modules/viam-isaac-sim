@@ -79,3 +79,35 @@ def test_spawn_gives_the_handle_the_frame_pose_without_the_usd_yaw_offset(
     )
     assert handle_kwargs["base_position"] == pytest.approx((1.5, 0.0, 0.0))
     assert handle_kwargs["base_orientation"] == pytest.approx(list(frame))
+
+
+def test_custom_arm_reports_relative_to_its_first_joints_parent_link():
+    # a humanoid's arm sharing one articulation: its kinematics base is the
+    # link its first joint hangs off (which moves with the torso), not world
+    yaw = quat_from_euler_deg(0.0, 0.0, 90.0)
+    handle = _handle((1.0, 0.5, 0.2), yaw)
+    handle._base_prim = SimpleNamespace(get_world_pose=lambda: ((1.0, 0.0, 0.0), yaw))
+    position, rotation = handle.get_end_pose_in_base()
+    assert position == pytest.approx((0.5, 0.0, 0.2), abs=1e-9)
+    assert rotation == pytest.approx(IDENTITY, abs=1e-9)
+
+
+def _prim(name, children=(), body0=None):
+    rel = SimpleNamespace(GetTargets=lambda: [body0] if body0 else [])
+    return SimpleNamespace(
+        GetName=lambda: name,
+        GetChildren=lambda: list(children),
+        GetRelationship=lambda rel_name: rel if rel_name == "physics:body0" else None,
+    )
+
+
+def test_custom_arm_spawn_finds_the_first_joints_parent_link():
+    root = _prim(
+        "robot",
+        [
+            _prim("torso"),
+            _prim("joints", [_prim("arm_1", body0="/World/robot/torso")]),
+        ],
+    )
+    assert sim_manager._joint_parent_link(root, "arm_1") == "/World/robot/torso"
+    assert sim_manager._joint_parent_link(root, "missing") is None

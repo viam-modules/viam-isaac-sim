@@ -728,6 +728,20 @@ def _usd_drive_gains(root_prim: Any, names: set[str]) -> dict[str, tuple[float, 
     return gains
 
 
+def _joint_parent_link(root_prim: Any, joint_name: str) -> str | None:
+    """Path of the link (body0) the named joint under root_prim hangs off."""
+    stack = [root_prim]
+    while stack:
+        prim = stack.pop()
+        if prim.GetName() == joint_name:
+            rel = prim.GetRelationship("physics:body0")
+            targets = rel.GetTargets() if rel else []
+            if targets:
+                return str(targets[0])
+        stack.extend(prim.GetChildren())
+    return None
+
+
 def _prismatic_joint_names(root_prim: Any) -> set[str]:
     """Names of the prismatic joints under an articulation (DOF names in Isaac)."""
     from pxr import Usd, UsdPhysics
@@ -3122,6 +3136,10 @@ class SimManager:
         if hasattr(root, "GetStage"):  # a real USD prim (unit-test stand-ins lack one)
             sliding = _prismatic_joint_names(root)
             handle.prismatic = tuple(joint in sliding for joint in handle.joint_names())
+            if not meta:  # known assets keep their spawn pose as the base
+                base_link = _joint_parent_link(root, handle.joint_names()[0])
+                if base_link:
+                    handle._base_prim = self._isaac.SingleXFormPrim(base_link)
         return handle
 
     def create_gripper(self, name: str, attrs: dict[str, Any]) -> "GripperHandle":
@@ -4234,6 +4252,7 @@ class ArmHandle:
     _sim: "SimManager"
     _base_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
     _base_orientation: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
+    _base_prim: Any = None  # custom arms: the link the first joint hangs off
     # per joint_names() entry: True for a prismatic joint (native meters, Viam mm);
     # empty means every joint is revolute (native radians, Viam degrees)
     prismatic: tuple[bool, ...] = ()
@@ -4326,12 +4345,22 @@ class ArmHandle:
         self,
     ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
         """The end effector pose in the arm's base frame, as GetEndPosition
-        reports it."""
+        reports it: the spawn pose, or for a custom arm the live pose of the
+        link its first joint hangs off (its kinematics base)."""
         from .spatial import pose_in_frame
 
         position, rotation = self.get_end_pose()
+        if self._base_prim is None:
+            return pose_in_frame(
+                self._base_position, self._base_orientation, position, rotation
+            )
+        # ponytail: base read after the end pose, a step apart at worst
+        base_position, base_rotation = self._sim.run(self._base_prim.get_world_pose)
         return pose_in_frame(
-            self._base_position, self._base_orientation, position, rotation
+            tuple(float(v) for v in base_position),
+            tuple(float(v) for v in base_rotation),
+            position,
+            rotation,
         )
 
     def capture_state(self):
