@@ -258,3 +258,19 @@ def test_status_reports_each_cameras_idle_state(mock_sim):
     assert cams["idle"]["paused"] is True
     assert cams["busy"]["paused"] is False
     assert 0.0 <= cams["busy"]["last_read_s_ago"] < 5.0
+
+
+def test_read_after_resume_waits_three_rendered_steps(mock_sim):
+    # one step after re-enabling the render product still returns the
+    # pre-pause image on Isaac Sim 5.0
+    from isaac_module.sim_manager import IsaacCameraHandle
+
+    handle = IsaacCameraHandle(mock_sim, FakeCam())
+    handle.pause()
+
+    def task():
+        start = mock_sim._loop_index
+        return start, handle._read(lambda: mock_sim._loop_index)
+
+    start, fut = mock_sim.run(task)
+    assert fut.result(timeout=5) - start >= 2  # served in the 3rd step's flush
