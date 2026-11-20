@@ -5856,13 +5856,15 @@ def asset_cache_dir() -> Path:
 # ponytail: fixed band; Mabel's torso jitters ~1.2 deg around a reached
 # target. Make it per-arm (path_tolerance_delta_deg) if a real arm needs tighter.
 STOP_KEEPS_TARGET_WITHIN_RAD = math.radians(2.0)
-URDF_IMPORT_VERSION = 1
+URDF_IMPORT_VERSION = 2
 # a cold import of a big robot (Mabel: ~150 meshes) takes minutes, longer than
 # the 120 s spawn budget, so it gets its own
 URDF_IMPORT_TIMEOUT_S = 900.0
-# critically damped and stiff enough to hold a humanoid's torso against gravity;
-# the importer's own default (25 rad/s, damping from <dynamics>) sags
-URDF_DRIVE_DEFAULT = {"natural_frequency": 100.0, "damping_ratio": 1.0}
+# critically damped and stiff enough to hold a humanoid's limbs and lift against
+# gravity (750 rad/s: 562500 per rad, about the stiffness revolute joints got
+# before the per-degree fix); the importer's own default (25 rad/s, damping
+# from <dynamics>) sags
+URDF_DRIVE_DEFAULT = {"natural_frequency": 750.0, "damping_ratio": 1.0}
 
 
 def _urdf_drive(attrs: dict[str, Any]) -> tuple[float, float]:
@@ -5914,7 +5916,8 @@ def _set_urdf_drives(
     """Position-drive gains for every joint, with the importer UI's math:
     stiffness = compute_natural_stiffness (nf^2, times joint inertia for force
     drives), damping = 2 * m_eq * nf * damping_ratio (m_eq = 1, or the joint
-    inertia for force drives)."""
+    inertia for force drives). These are per radian; the importer writes them
+    to USD as-is, where angular drives are per degree, so convert those."""
     joints = robot.joints  # a copy: written back below
     for name, joint in joints.items():
         drive = joint.drive
@@ -5922,10 +5925,13 @@ def _set_urdf_drives(
             continue
         force = drive.drive_type == urdf.UrdfJointDriveType.JOINT_DRIVE_FORCE
         m_eq = joint.inertia if force else 1.0
+        per_unit = 1.0 if joint.type == urdf.UrdfJointType.JOINT_PRISMATIC else math.pi / 180
         drive.natural_frequency = natural_frequency
         drive.damping_ratio = damping_ratio
-        drive.strength = interface.compute_natural_stiffness(robot, name, natural_frequency)
-        drive.damping = 2 * m_eq * natural_frequency * damping_ratio
+        drive.strength = (
+            interface.compute_natural_stiffness(robot, name, natural_frequency) * per_unit
+        )
+        drive.damping = 2 * m_eq * natural_frequency * damping_ratio * per_unit
     robot.joints = joints
 
 
