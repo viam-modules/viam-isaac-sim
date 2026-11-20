@@ -890,9 +890,17 @@ def _values_close(actual: Sequence[float], expected: Sequence[float]) -> bool:
 
 
 def _quaternions_close(actual: Sequence[float], expected: Sequence[float]) -> bool:
-    return _values_close(actual, expected) or _values_close(
-        actual, tuple(-float(value) for value in expected)
+    """Same rotation within 1e-3 rad, q and -q alike. Isaac keeps camera
+    rotations in float32 in USD camera axes, where a frame near 180 deg in
+    Viam/ROS axes is near identity; float32 quantizes such a tiny angle by up
+    to ~7e-4 rad, so per-component checks reject poses that did apply."""
+    dot = sum(float(a) * float(e) for a, e in zip(actual, expected))
+    norms = math.sqrt(sum(float(a) ** 2 for a in actual)) * math.sqrt(
+        sum(float(e) ** 2 for e in expected)
     )
+    if len(actual) != 4 or len(expected) != 4 or norms == 0.0:
+        return False
+    return 2.0 * math.acos(min(1.0, abs(dot) / norms)) <= 1e-3
 
 
 def _apply_camera_configuration(camera: Any, attrs: dict[str, Any]) -> None:
