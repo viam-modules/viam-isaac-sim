@@ -65,7 +65,13 @@ def test_frame_wins_over_position_attr():
     assert attrs["position"] == [3.0, 0.0, 0.0]
 
 
-def test_frame_with_a_non_world_parent_is_not_a_spawn_pose():
+def test_frame_with_a_non_world_parent_is_not_a_spawn_pose(monkeypatch):
+    from isaac_module.models import utils
+
+    warnings = []
+    monkeypatch.setattr(
+        utils.LOGGER, "warning", lambda msg, *args: warnings.append(msg % args)
+    )
     # e.g. a URDF robot's loader arm framed under a sibling arm ("lift"): the
     # translation is relative to that parent, so spawning the robot root there
     # laid the whole robot on its side, floating.
@@ -76,6 +82,10 @@ def test_frame_with_a_non_world_parent_is_not_a_spawn_pose():
     cfg.frame.orientation.quaternion.x = 0.7071
     attrs = apply_frame_to_attrs(cfg, {"position": [1, 2, 0]})
     assert attrs == {"position": [1, 2, 0]}
+    # silently ignoring it would move e.g. an arm framed under a table
+    assert len(warnings) == 1
+    assert "torso" in warnings[0] and "'lift'" in warnings[0]
+    assert "`position`" in warnings[0]
 
 
 def test_articulation_pose_becomes_reset_default_and_current_pose():

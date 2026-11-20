@@ -2,6 +2,7 @@ import math
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 from viam.proto.app.robot import ComponentConfig
+from viam.logging import getLogger
 from viam.utils import struct_to_dict
 
 from ..spatial import (
@@ -13,6 +14,9 @@ from ..spatial import (
     quat_mul,
     quat_rotate,
 )
+
+
+LOGGER = getLogger("viam-isaac-sim")
 
 
 def get_attrs(config: ComponentConfig) -> Dict[str, Any]:
@@ -72,6 +76,13 @@ def apply_frame_to_attrs(
     is relative to it, not a world pose, so it leaves the attrs alone (e.g. a
     URDF robot's loader arm framed under a sibling arm)."""
     if config.HasField("frame") and config.frame.parent not in ("", "world"):
+        LOGGER.warning(
+            "%s: frame parent %r is not world, so it is not used as the spawn "
+            "pose; set the `position` attribute (meters, world) to place a prim "
+            "this component spawns",
+            config.name,
+            config.frame.parent,
+        )
         return attrs
     position, quat = frame_pose(config)
     if position is not None:
