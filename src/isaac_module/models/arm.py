@@ -250,7 +250,9 @@ class IsaacArm(Arm, EasyResource):
         self._control_period = 1.0 / _DEFAULT_CONTROL_FREQ_HZ
         self._max_step_rad = math.radians(_DEFAULT_MAX_STEP_DEG)
         self._kinematics: Optional[Tuple[Any, ...]] = None
-        self._models: Dict[str, bytes] = {}
+        self._chain: Optional[Dict[str, Any]] = None  # derived kinematics' chain, for Get3DModels
+        self._models: Optional[Dict[str, bytes]] = None
+        self._generation = 0  # bumped by reconfigure: a load started before it is stale
         self._moving_count = 0
 
     @classmethod
@@ -323,7 +325,8 @@ class IsaacArm(Arm, EasyResource):
         initial_joint_positions_deg = _initial_joint_positions_deg(attrs, config.name)
         if initial_joint_positions_deg is not None:
             attrs["initial_joint_positions_deg"] = initial_joint_positions_deg
-        self._kinematics, self._models = None, {}
+        self._kinematics, self._chain, self._models = None, None, None
+        self._generation += 1
         self._handle = SimManager.get().create_arm(self.name, attrs)
 
     async def close(self) -> None:
@@ -567,20 +570,18 @@ class IsaacArm(Arm, EasyResource):
             return KNOWN_ASSETS[asset].get("kinematics")
         return None
 
-    def _derive_kinematics(self) -> Tuple[Any, ...]:
-        visual = bool(self._attrs.get("visual_models"))
-        chain = self._h().stage_chain(self.name, visual)
-        meshes = self._attrs.get("planning_geometry") == "mesh"
-        urdf, files = build_urdf(chain, meshes)
-        if visual:
-            self._models = visual_glbs(chain, meshes)
+    def _derive_kinematics(self) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+        chain = self._h().stage_chain(self.name, bool(self._attrs.get("visual_models")))
+        urdf, files = build_urdf(chain, self._attrs.get("planning_geometry") == "mesh")
         fmt = KinematicsFileFormat.KINEMATICS_FILE_FORMAT_URDF
         if not files:
-            return fmt, urdf
+            return (fmt, urdf), chain
         # RDK reads a URDF's mesh collisions from these, keyed by filename
-        return fmt, urdf, {path: Mesh(content_type=kind, mesh=data) for path, (kind, data) in files.items()}
+        meshes = {path: Mesh(content_type=kind, mesh=data) for path, (kind, data) in files.items()}
+        return (fmt, urdf, meshes), chain
 
-    def _load_kinematics(self) -> Tuple[Any, ...]:
+    def _load_kinematics(self) -> Tuple[Tuple[Any, ...], Optional[Dict[str, Any]]]:
+        """The kinematics GetKinematics serves, and a derived arm's chain."""
         url = self._kinematics_url()
         if not url:
             return self._derive_kinematics()
@@ -598,7 +599,7 @@ class IsaacArm(Arm, EasyResource):
         )
         if os.path.exists(cache):
             with open(cache, "rb") as f:
-                return fmt, f.read()
+                return (fmt, f.read()), None
 
         self.logger.info("fetching kinematics for %s from %s", self.name, url)
         with urllib.request.urlopen(url, timeout=30) as resp:
@@ -611,20 +612,36 @@ class IsaacArm(Arm, EasyResource):
             os.replace(tmp, cache)
         except OSError:
             pass  # caching is best-effort
-        return fmt, data
+        return (fmt, data), None
 
     async def get_kinematics(self, **kwargs) -> Any:
-        if self._kinematics is None:
-            self._kinematics = await asyncio.to_thread(self._load_kinematics)
-        return self._kinematics
+        if self._kinematics is not None:
+            return self._kinematics
+        generation = self._generation
+        kinematics, chain = await asyncio.to_thread(self._load_kinematics)
+        if generation == self._generation:  # else reconfigured meanwhile: don't keep it
+            self._kinematics, self._chain = kinematics, chain
+        return kinematics
 
     async def get_3d_models(self, **kwargs) -> Mapping[str, Mesh]:
         if not self._attrs.get("visual_models"):
             return {}
         await self.get_kinematics()
+        models = self._models
+        if models is None:
+            if self._chain is None:
+                return {}
+            generation, meshes = self._generation, self._attrs.get("planning_geometry") == "mesh"
+            try:
+                models = await asyncio.to_thread(visual_glbs, self._chain, meshes)
+            except ImportError as exc:  # trimesh comes with isaacsim, not this module
+                self.logger.warning("%s: visual_models needs trimesh (%s); serving none", self.name, exc)
+                return {}
+            if generation == self._generation:
+                self._models = models
         return {
             link: Mesh(content_type="model/gltf-binary", mesh=glb)
-            for link, glb in self._models.items()
+            for link, glb in models.items()
         }
 
     async def set_manual_mode(

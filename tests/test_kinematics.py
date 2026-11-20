@@ -123,3 +123,27 @@ def test_validate_rejects_stage_geometry_attrs_it_cannot_serve(attrs):
     )
     with pytest.raises(ValueError):
         IsaacArm.validate_config(config)
+
+
+def test_derived_kinematics_never_need_trimesh(sim, monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "trimesh", None)  # import trimesh -> ImportError
+    arm = _derived_arm("kin-notrimesh-arm", monkeypatch, visual_models=True)
+    fmt, data = asyncio.run(arm.get_kinematics())
+    assert fmt == KinematicsFileFormat.KINEMATICS_FILE_FORMAT_URDF
+    assert asyncio.run(arm.get_3d_models()) == {}
+
+
+def test_kinematics_loaded_across_a_reconfigure_are_not_kept(sim, monkeypatch):
+    from test_stage_geometry import _chain
+
+    arm = _arm("kin-race-arm", {"world": "sim-world", "joint_names": ["j1"]})
+
+    def reconfigured_mid_load(name, visual):
+        arm._generation += 1  # what reconfigure does
+        return _chain()
+
+    monkeypatch.setattr(arm._handle, "stage_chain", reconfigured_mid_load, raising=False)
+    asyncio.run(arm.get_kinematics())
+    assert arm._kinematics is None

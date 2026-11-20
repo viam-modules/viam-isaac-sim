@@ -5449,19 +5449,28 @@ class IsaacGripperHandle(GripperHandle):
         from .stage_geometry import hand_links, matrix_from_pose, moved, planning_pieces
 
         def _read():
+            from pxr import UsdGeom
+
             isaac = self._sim._isaac
+            root = isaac.get_prim_at_path(arm._prim_path)
+            meters = UsdGeom.GetStageMetersPerUnit(root.GetStage())
             if self._stage_links is None:  # each link's collision triangles, in its own frame
-                root = isaac.get_prim_at_path(arm._prim_path)
                 stage = root.GetStage()
                 self._stage_links = [
                     (path.rsplit("/", 1)[-1], isaac.SingleXFormPrim(path), piece)
                     for path in hand_links(root, str(arm._ee.prim_path))
                     if (piece := planning_pieces(stage.GetPrimAtPath(path)))
                 ]
+            # stage units throughout, meters out: the frame offset is meters
             frame = matrix_from_pose(*_pose_floats(arm._ee.get_world_pose()))
-            to_frame = np.linalg.inv(frame @ matrix_from_pose(position, quat_wxyz))
+            offset = matrix_from_pose([v / meters for v in position], quat_wxyz)
+            to_frame = np.linalg.inv(frame @ offset)
             return [
-                (name, moved(to_frame @ matrix_from_pose(*_pose_floats(prim.get_world_pose())), vertices), faces)
+                (
+                    name,
+                    moved(to_frame @ matrix_from_pose(*_pose_floats(prim.get_world_pose())), vertices) * meters,
+                    faces,
+                )
                 for name, prim, (vertices, faces) in self._stage_links
             ]
 

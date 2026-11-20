@@ -394,7 +394,11 @@ collision prims (a URDF link with only `<visual>`s); a primitive collider
 those hulls by default, or with `planning_geometry: "mesh"` as the hulls
 themselves, PLY with `GetKinematics`. The base link carries no geometry: it
 belongs to the limb above. `visual_models: true` serves each link's visible
-prims as an untextured GLB through `Get3DModels`, for the 3D viewer.
+prims as an untextured GLB through `Get3DModels`, for the 3D viewer: up to
+20,000 triangles a link, decimated past that (with `fast_simplification`
+installed) or else the convex hull of a sample of its points. It needs
+`trimesh`, which comes with Isaac Sim; without it `Get3DModels` logs a warning
+and serves none. Stage units are converted to meters (`metersPerUnit`).
 
 ```json
 { "prim_path": "/World/mabel", "end_effector_prim": "/World/mabel/l_hand_mount",

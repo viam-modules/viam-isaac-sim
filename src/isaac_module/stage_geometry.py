@@ -17,8 +17,11 @@ from typing import Any, Sequence
 from xml.etree import ElementTree
 
 import numpy as np
+from viam.logging import getLogger
 
+LOGGER = getLogger(__name__)
 UNLIMITED_RAD = 2 * math.pi  # a revolute joint with no USD limits plans over -360..360 degrees
+VISUAL_FACE_CAP = 20_000  # per link GLB: full-res Mabel arm links are ~2 MB each
 
 
 def ply(pieces: Sequence[tuple[np.ndarray, np.ndarray]]) -> bytes:
@@ -164,14 +167,31 @@ def build_urdf(chain: dict, meshes: bool) -> tuple[bytes, dict[str, tuple[str, b
 def visual_glbs(chain: dict, meshes: bool) -> dict[str, bytes]:
     """A GLB of each link's visual prims, keyed by link name, in the frame of
     the link's collision (where a viewer draws a link's 3D model); a link with
-    no collision gets none. Untextured, grey."""
+    no collision gets none. Untextured, grey. A link over VISUAL_FACE_CAP
+    triangles is decimated to it (needs fast_simplification), else served as
+    the convex hull of a sample of its points. Needs trimesh (ImportError without it)."""
     import trimesh
 
-    return {
-        name: trimesh.Trimesh(*visual, process=False).export(file_type="glb")
-        for name, _, _, visual in _links(_renamed(chain), meshes)
-        if visual is not None
-    }
+    models = {}
+    for name, _, _, visual in _links(_renamed(chain), meshes):
+        if visual is None:
+            continue
+        mesh = trimesh.Trimesh(*visual, process=False)
+        if len(mesh.faces) > VISUAL_FACE_CAP:
+            try:
+                mesh = mesh.simplify_quadric_decimation(face_count=VISUAL_FACE_CAP)
+                how = "decimated"
+            except Exception:  # no fast_simplification: a convex hull, coarse but closed
+                # a hull has ~2 faces per vertex: sample the points down to fit the cap
+                points = mesh.vertices[:: math.ceil(len(mesh.vertices) / (VISUAL_FACE_CAP // 2))]
+                mesh = trimesh.Trimesh(*hull(points), process=False)
+                how = "convex hull"
+            LOGGER.info(
+                "%s: visual model of %s capped at %d triangles (%s, %d)",
+                chain["name"], name, VISUAL_FACE_CAP, how, len(mesh.faces),
+            )
+        models[name] = mesh.export(file_type="glb")
+    return models
 
 
 # ----------------------------------------------------------------------------
@@ -230,14 +250,18 @@ def _triangles(prim: Any) -> tuple[np.ndarray, np.ndarray]:
 
 
 def hull(vertices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """A point cloud's convex hull (vertices, faces); a flat or tiny one as
-    the triangles of its points in order (it has no volume to hull)."""
+    """A point cloud's convex hull (vertices, faces), joggled (QJ) for a flat
+    one; too few points to hull as the triangles of its points in order."""
     from scipy.spatial import ConvexHull, QhullError
 
     vertices = np.asarray(vertices, float)
-    try:
-        simplices = ConvexHull(vertices).simplices
-    except (QhullError, ValueError):
+    for options in (None, "QJ"):
+        try:
+            simplices = ConvexHull(vertices, qhull_options=options).simplices
+            break
+        except (QhullError, ValueError):
+            continue
+    else:
         return vertices, np.array([[0, k, k + 1] for k in range(1, len(vertices) - 1)], int)
     used = np.unique(simplices)
     remap = np.full(len(vertices), -1)
@@ -316,6 +340,7 @@ def stage_chain(
     from pxr import UsdGeom, UsdPhysics
 
     stage = root.GetStage()
+    meters = UsdGeom.GetStageMetersPerUnit(stage)
     by_child = _joints_by_child(root)
     ee = stage.GetPrimAtPath(ee_path)
     if not ee.IsValid():
@@ -346,13 +371,13 @@ def stage_chain(
             typed = UsdPhysics.RevoluteJoint(prim) if revolute else UsdPhysics.PrismaticJoint(prim)
             step["axis"] = tuple(1.0 if a == typed.GetAxisAttr().Get() else 0.0 for a in "XYZ")
             lower, upper = typed.GetLowerLimitAttr().Get(), typed.GetUpperLimitAttr().Get()
-            if lower is None or upper is None or not (math.isfinite(lower) and math.isfinite(upper)):
-                if prismatic:
-                    raise ValueError(f"{name}: prismatic joint {prim.GetName()} has no limits")
-                step["lower"], step["upper"] = -UNLIMITED_RAD, UNLIMITED_RAD
-            else:  # USD revolute limits are degrees
-                scale = math.pi / 180.0 if revolute else 1.0
-                step["lower"], step["upper"] = lower * scale, upper * scale
+            finite = [v is not None and math.isfinite(v) for v in (lower, upper)]
+            if prismatic and not all(finite):
+                raise ValueError(f"{name}: prismatic joint {prim.GetName()} has no limits")
+            # USD revolute limits are degrees, prismatic ones stage units; a missing side is unlimited
+            scale = math.pi / 180.0 if revolute else meters
+            step["lower"] = lower * scale if finite[0] else -UNLIMITED_RAD
+            step["upper"] = upper * scale if finite[1] else UNLIMITED_RAD
         steps.append(step)
         path = str(joint.GetBody0Rel().GetTargets()[0])
     steps.reverse()
@@ -362,12 +387,24 @@ def stage_chain(
             f"{name}: the joints from {base_path} to {ee_path} are {movable}, not "
             f"joint_names {list(joint_names)}; derived kinematics need the chain's joints in order"
         )
+    for step in steps:  # stage units to meters
+        for key in ("parent_frame", "child_frame"):
+            step[key] = _in_meters(step[key], meters)
+        for key in ("collision", "visual"):
+            if step[key] is not None:
+                step[key] = (step[key][0] * meters, step[key][1])
     return {
         "name": name,
         "base": stage.GetPrimAtPath(base_path).GetName(),
         "steps": steps,
-        "end": {"name": ee.GetName(), "frame": _matrix(end)},
+        "end": {"name": ee.GetName(), "frame": _in_meters(_matrix(end), meters)},
     }
+
+
+def _in_meters(matrix: np.ndarray, meters_per_unit: float) -> np.ndarray:
+    result = matrix.copy()
+    result[:3, 3] *= meters_per_unit
+    return result
 
 
 def _owner_link(prim: Any, links: set[str]) -> Any:
