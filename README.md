@@ -295,7 +295,10 @@ unchanged. `max_joint_deg_s2` sets the
 positive finite per-joint acceleration limit reported to trajectory
 parameterizers. `is_moving_velocity_threshold_rad_s` sets the per-joint velocity
 noise floor used by `IsMoving`; it defaults to `0.01` rad/s and must be finite
-and non-negative. Known UR assets default to `wrist_3_link`; `lite6` selects
+and non-negative. `Stop` holds the measured position, except when no
+trajectory is running and every joint is within 2° of its current target: then
+it keeps the target, so a settled arm doesn't latch drive jitter as its new
+pose. Known UR assets default to `wrist_3_link`; `lite6` selects
 NVIDIA's integrated gripper variant and defaults to its gripper body.
 `uf850_g2` is a UFACTORY 850 with its Gripper G2, shipped with this module
 rather than the Isaac content server (`src/isaac_module/assets/uf850_g2`, with
