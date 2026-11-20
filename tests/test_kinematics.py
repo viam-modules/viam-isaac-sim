@@ -74,3 +74,52 @@ def test_kinematics_known_asset_download(sim):
     # cached: second call returns identical bytes
     fmt2, data2 = asyncio.run(arm.get_kinematics())
     assert data2 == data
+
+
+def _derived_arm(name, monkeypatch, **attrs):
+    from test_stage_geometry import _chain
+
+    arm = _arm(name, {"world": "sim-world", "joint_names": ["j1"], **attrs})
+    monkeypatch.setattr(arm._handle, "stage_chain", lambda name, visual: _chain(), raising=False)
+    return arm
+
+
+def test_arm_without_kinematics_url_derives_urdf_from_the_stage(sim, monkeypatch):
+    arm = _derived_arm("kin-derived-arm", monkeypatch)
+    fmt, data = asyncio.run(arm.get_kinematics())
+    assert fmt == KinematicsFileFormat.KINEMATICS_FILE_FORMAT_URDF
+    assert b"<box" in data
+
+
+def test_derived_arm_serves_mesh_collisions_with_its_kinematics(sim, monkeypatch):
+    arm = _derived_arm("kin-mesh-arm", monkeypatch, planning_geometry="mesh")
+    fmt, data, meshes = asyncio.run(arm.get_kinematics())
+    assert b'filename="l1.ply"' in data
+    assert meshes["l1.ply"].content_type == "ply"
+
+
+def test_derived_arm_visual_models(sim, monkeypatch):
+    pytest.importorskip("trimesh")
+    arm = _derived_arm("kin-visual-arm", monkeypatch, visual_models=True)
+    models = asyncio.run(arm.get_3d_models())
+    assert list(models) == ["l1"]
+    assert models["l1"].content_type == "model/gltf-binary"
+    plain = _derived_arm("kin-novisual-arm", monkeypatch)
+    assert asyncio.run(plain.get_3d_models()) == {}
+
+
+@pytest.mark.parametrize(
+    "attrs",
+    [
+        {"kinematics_url": "file:///x.json", "planning_geometry": "mesh"},
+        {"kinematics_url": "file:///x.json", "visual_models": True},
+        {"planning_geometry": "hull"},
+        {"visual_models": "yes"},
+    ],
+)
+def test_validate_rejects_stage_geometry_attrs_it_cannot_serve(attrs):
+    config = ComponentConfig(
+        name="bad", attributes=dict_to_struct({"world": "sim-world", **attrs})
+    )
+    with pytest.raises(ValueError):
+        IsaacArm.validate_config(config)
