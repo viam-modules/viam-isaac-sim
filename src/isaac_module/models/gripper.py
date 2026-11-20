@@ -16,6 +16,7 @@ from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import (
     Geometry,
     KinematicsFileFormat,
+    Mesh,
     Pose,
     RectangularPrism,
     ResourceName,
@@ -34,7 +35,8 @@ from ..sim_manager import (
     _prim_name,
     gripper_meta,
 )
-from .utils import get_attrs
+from ..stage_geometry import ply
+from .utils import frame_pose, get_attrs
 
 DEFAULT_ASSET = "robotiq_2f_85"
 DEFAULT_TCP_OFFSET_M = 0.134
@@ -92,6 +94,8 @@ class IsaacGripper(Gripper, EasyResource):
         self._asset = ""
         self._sensorless = False
         self._active_grip = False
+        # a joint-name gripper: its links' collision meshes, from its Viam frame
+        self._stage_frame: Optional[tuple] = None
 
     @classmethod
     def new(
@@ -176,6 +180,10 @@ class IsaacGripper(Gripper, EasyResource):
         tcp_offset_m = float(meta.get("tcp_offset_m", DEFAULT_TCP_OFFSET_M))
         self._jaw_box_center_z_mm = self._jaw_box_mm[2] / 2.0 - tcp_offset_m * 1000.0
         self._kinematics = None
+        self._stage_frame = None
+        if meta.get("joints_on_arm"):
+            position, quat = frame_pose(config)
+            self._stage_frame = (position or (0.0, 0.0, 0.0), quat or (1.0, 0.0, 0.0, 0.0))
         self._handle = SimManager.get().create_gripper(self.name, attrs)
         self._asset = str(attrs.get("asset") or attrs.get("gripper_model", "joint_gripper"))
 
@@ -271,6 +279,11 @@ class IsaacGripper(Gripper, EasyResource):
     async def get_kinematics(
         self, **kwargs
     ) -> Tuple[KinematicsFileFormat.ValueType, bytes]:
+        if self._stage_frame is not None:
+            # RDK falls back to GetGeometries, which serves the hand's own shape
+            raise NotImplementedError(
+                f"gripper {self.name}: its shape is served by GetGeometries"
+            )
         if self._kinematics is None:
             self._kinematics = (
                 KinematicsFileFormat.KINEMATICS_FILE_FORMAT_SVA,
@@ -323,6 +336,18 @@ class IsaacGripper(Gripper, EasyResource):
         await self._wait_stopped()
 
     async def get_geometries(self, **kwargs) -> list[Geometry]:
+        if self._stage_frame is not None:
+            pieces = await asyncio.to_thread(
+                self._h().collision_pieces, *self._stage_frame
+            )
+            return [
+                Geometry(
+                    center=Pose(o_z=1),
+                    mesh=Mesh(content_type="ply", mesh=ply([(vertices, faces)])),
+                    label=f"{self.name}:{link}",
+                )
+                for link, vertices, faces in pieces
+            ]
         return [
             Geometry(
                 center=Pose(

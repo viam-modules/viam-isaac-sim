@@ -951,3 +951,50 @@ def test_stop_keeps_a_settled_grip():
     handle.stop()
     assert handle.is_holding()
     assert handle._target == 0.0  # still squeezing toward closed
+
+
+def _hand(manager, monkeypatch, pieces):
+    IsaacArm.new(
+        _config("pick-arm", {"world": "sim-world", "joint_names": ["a1"], "mock_dof": 1}),
+        {},
+    )
+    config = _config(
+        "hand",
+        {
+            "world": "sim-world",
+            "arm": "pick-arm",
+            "joint_names": ["f1", "f2"],
+            "open_position": 0.0,
+            "closed_position": 1.0,
+            "position_unit": "rad",
+        },
+    )
+    config.frame.parent = "pick-arm"
+    config.frame.translation.y = -250.0
+    gripper = IsaacGripper.new(config, {})
+    seen = []
+
+    def collision_pieces(position, quat):
+        seen.append((position, quat))
+        return pieces
+
+    monkeypatch.setattr(gripper._handle, "collision_pieces", collision_pieces, raising=False)
+    return gripper, seen
+
+
+def test_joint_name_gripper_serves_its_links_collision_meshes(manager, monkeypatch):
+    triangle = (np.array([[0, 0, 0], [0.1, 0, 0], [0, 0.1, 0]], float), np.array([[0, 1, 2]]))
+    gripper, seen = _hand(manager, monkeypatch, [("palm", *triangle)])
+    geometries = asyncio.run(gripper.get_geometries())
+    assert [g.label for g in geometries] == ["hand:palm"]
+    assert geometries[0].mesh.content_type == "ply"
+    assert b"element face 1" in geometries[0].mesh.mesh
+    assert geometries[0].center.o_z == 1
+    # measured from the gripper's Viam frame: the arm's end plus its frame offset
+    assert seen[0][0] == pytest.approx((0.0, -0.25, 0.0))
+
+
+def test_joint_name_gripper_leaves_its_shape_to_get_geometries(manager, monkeypatch):
+    gripper, _ = _hand(manager, monkeypatch, [])
+    with pytest.raises(NotImplementedError):
+        asyncio.run(gripper.get_kinematics())

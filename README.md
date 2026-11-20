@@ -381,6 +381,32 @@ or file://). With kinematics served, the motion service can plan
 for the simulated arm. Module-level `MoveToPosition` still raises - use the
 motion service.
 
+An arm with no `kinematics_url` whose base is a link (a `.urdf` `usd_path`,
+or `joint_names` on a shared `prim_path`) derives its kinematics from the live
+stage instead, served as URDF: the joints from the link its first joint hangs
+off to `end_effector_prim` (fixed joints included, in meters and radians; the
+movable ones must be `joint_names`, in order), each URDF joint at the USD
+joint's frame on its parent link. Each link's planning geometry is the convex
+hull of each of its collision prims (what PhysX collides with: the importer's
+`convexHull` approximation), or of each visible prim for a link with no
+collision prims (a URDF link with only `<visual>`s); a primitive collider
+(cylinder, sphere) counts as its extent box. It is served as a box fitted to
+those hulls by default, or with `planning_geometry: "mesh"` as the hulls
+themselves, PLY with `GetKinematics`. The base link carries no geometry: it
+belongs to the limb above. `visual_models: true` serves each link's visible
+prims as an untextured GLB through `Get3DModels`, for the 3D viewer: up to
+20,000 triangles a link, decimated past that (with `fast_simplification`
+installed) or else the convex hull of a sample of its points. It needs
+`trimesh`, which comes with Isaac Sim; without it `Get3DModels` logs a warning
+and serves none. Stage units are converted to meters (`metersPerUnit`).
+
+```json
+{ "prim_path": "/World/mabel", "end_effector_prim": "/World/mabel/l_hand_mount",
+  "joint_names": ["left_arm_1", "left_arm_2", "left_arm_3", "left_arm_4",
+                  "left_arm_5", "left_arm_6", "left_arm_7"],
+  "planning_geometry": "mesh", "visual_models": true }
+```
+
 For timestamped controllers, arm `DoCommand` accepts
 `{"command":"set_joint_targets_radians","values":[q0,...,qN]}`. It validates
 one finite radians target per arm joint, latches them, and returns immediately without waiting
@@ -450,7 +476,12 @@ on RidgebackFranka) needs no preset: replace `asset` with `joint_names`
 (`position_unit`: `m` default, or `rad`). `drive_stiffness` / `drive_damping`
 (default 2000 / 100) override the USD's finger gains, which can be stiff
 enough to squeeze a held object out (RidgebackFranka ships 1e7 and 1200 N).
-`holding_tolerance` and `tcp_offset_m` are optional.
+`holding_tolerance` and `tcp_offset_m` are optional. Such a hand serves no
+kinematics: `GetGeometries` returns the links hanging below the arm's
+`end_effector_prim` link (palm, fingers), each as the convex hulls of its
+collision prims (PLY) in the gripper's frame at the fingers' current pose, and
+the motion planner reads them from there. Preset
+grippers keep their jaw box.
 
 ```json
 { "arm": "franka", "joint_names": ["panda_finger_joint1", "panda_finger_joint2"],

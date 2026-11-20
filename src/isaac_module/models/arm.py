@@ -48,6 +48,20 @@ Attributes:
                                      by GetKinematics (.json = SVA, .urdf =
                                      URDF; file:// URLs work). Known assets with
                                      official Viam kinematics fetch them automatically.
+                                     Without one, an arm whose base is a link (a .urdf
+                                     usd_path, or joint_names on a shared prim_path)
+                                     derives URDF kinematics from the live stage: its
+                                     joints from the first joint's parent link to
+                                     end_effector_prim, each link's collision prims'
+                                     convex hulls (else its visible prims') as its
+                                     planning geometry
+  planning_geometry (string)       - derived kinematics: "shapes" (default), a box
+                                     fitted to each link's hulls, or "mesh", the
+                                     hulls themselves (served as PLY with
+                                     GetKinematics)
+  visual_models (bool)             - derived kinematics: serve each link's visible
+                                     prims as a GLB through Get3DModels, for the 3D
+                                     viewer (default false)
   initial_joint_positions_deg ([float]) - joint positions the arm spawns at
                                      and returns to on world reset, in the
                                      asset's joint order (default all zero;
@@ -92,6 +106,7 @@ from ..sim_manager import (
     SimManager,
 )
 from ..spatial import quat_to_ov
+from ..stage_geometry import build_urdf, visual_glbs
 from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
 _DEFAULT_TOLERANCE_DEG = 0.5
@@ -234,7 +249,10 @@ class IsaacArm(Arm, EasyResource):
         self._tolerance_rad = math.radians(_DEFAULT_TOLERANCE_DEG)
         self._control_period = 1.0 / _DEFAULT_CONTROL_FREQ_HZ
         self._max_step_rad = math.radians(_DEFAULT_MAX_STEP_DEG)
-        self._kinematics: Optional[Tuple[KinematicsFileFormat.ValueType, bytes]] = None
+        self._kinematics: Optional[Tuple[Any, ...]] = None
+        self._chain: Optional[Dict[str, Any]] = None  # derived kinematics' chain, for Get3DModels
+        self._models: Optional[Dict[str, bytes]] = None
+        self._generation = 0  # bumped by reconfigure: a load started before it is stale
         self._moving_count = 0
 
     @classmethod
@@ -256,6 +274,17 @@ class IsaacArm(Arm, EasyResource):
         _max_joint_deg_s2(attrs, config.name)
         _initial_joint_positions_deg(attrs, config.name)
         _joint_names(attrs, config.name)
+        if attrs.get("planning_geometry", "shapes") not in ("shapes", "mesh"):
+            raise ValueError(f'{config.name}: planning_geometry must be "shapes" or "mesh"')
+        if not isinstance(attrs.get("visual_models", False), bool):
+            raise ValueError(f"{config.name}: visual_models must be true or false")
+        if attrs.get("kinematics_url") and (
+            attrs.get("planning_geometry") == "mesh" or attrs.get("visual_models")
+        ):
+            raise ValueError(
+                f'{config.name}: planning_geometry "mesh" and visual_models are only for '
+                "derived kinematics (no kinematics_url)"
+            )
         return result
 
     def reconfigure(
@@ -296,6 +325,8 @@ class IsaacArm(Arm, EasyResource):
         initial_joint_positions_deg = _initial_joint_positions_deg(attrs, config.name)
         if initial_joint_positions_deg is not None:
             attrs["initial_joint_positions_deg"] = initial_joint_positions_deg
+        self._kinematics, self._chain, self._models = None, None, None
+        self._generation += 1
         self._handle = SimManager.get().create_arm(self.name, attrs)
 
     async def close(self) -> None:
@@ -539,13 +570,21 @@ class IsaacArm(Arm, EasyResource):
             return KNOWN_ASSETS[asset].get("kinematics")
         return None
 
-    def _load_kinematics(self) -> Tuple[KinematicsFileFormat.ValueType, bytes]:
+    def _derive_kinematics(self) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+        chain = self._h().stage_chain(self.name, bool(self._attrs.get("visual_models")))
+        urdf, files = build_urdf(chain, self._attrs.get("planning_geometry") == "mesh")
+        fmt = KinematicsFileFormat.KINEMATICS_FILE_FORMAT_URDF
+        if not files:
+            return (fmt, urdf), chain
+        # RDK reads a URDF's mesh collisions from these, keyed by filename
+        meshes = {path: Mesh(content_type=kind, mesh=data) for path, (kind, data) in files.items()}
+        return (fmt, urdf, meshes), chain
+
+    def _load_kinematics(self) -> Tuple[Tuple[Any, ...], Optional[Dict[str, Any]]]:
+        """The kinematics GetKinematics serves, and a derived arm's chain."""
         url = self._kinematics_url()
         if not url:
-            raise NotImplementedError(
-                f"no kinematics file known for arm {self.name}; set the "
-                '"kinematics_url" attribute (SVA .json or .urdf)'
-            )
+            return self._derive_kinematics()
         ext = os.path.splitext(url)[1].lower()
         fmt = (
             KinematicsFileFormat.KINEMATICS_FILE_FORMAT_URDF
@@ -560,7 +599,7 @@ class IsaacArm(Arm, EasyResource):
         )
         if os.path.exists(cache):
             with open(cache, "rb") as f:
-                return fmt, f.read()
+                return (fmt, f.read()), None
 
         self.logger.info("fetching kinematics for %s from %s", self.name, url)
         with urllib.request.urlopen(url, timeout=30) as resp:
@@ -573,17 +612,37 @@ class IsaacArm(Arm, EasyResource):
             os.replace(tmp, cache)
         except OSError:
             pass  # caching is best-effort
-        return fmt, data
+        return (fmt, data), None
 
-    async def get_kinematics(
-        self, **kwargs
-    ) -> Tuple[KinematicsFileFormat.ValueType, bytes]:
-        if self._kinematics is None:
-            self._kinematics = await asyncio.to_thread(self._load_kinematics)
-        return self._kinematics
+    async def get_kinematics(self, **kwargs) -> Any:
+        if self._kinematics is not None:
+            return self._kinematics
+        generation = self._generation
+        kinematics, chain = await asyncio.to_thread(self._load_kinematics)
+        if generation == self._generation:  # else reconfigured meanwhile: don't keep it
+            self._kinematics, self._chain = kinematics, chain
+        return kinematics
 
     async def get_3d_models(self, **kwargs) -> Mapping[str, Mesh]:
-        return {}
+        if not self._attrs.get("visual_models"):
+            return {}
+        await self.get_kinematics()
+        models = self._models
+        if models is None:
+            if self._chain is None:
+                return {}
+            generation, meshes = self._generation, self._attrs.get("planning_geometry") == "mesh"
+            try:
+                models = await asyncio.to_thread(visual_glbs, self._chain, meshes)
+            except ImportError as exc:  # trimesh comes with isaacsim, not this module
+                self.logger.warning("%s: visual_models needs trimesh (%s); serving none", self.name, exc)
+                return {}
+            if generation == self._generation:
+                self._models = models
+        return {
+            link: Mesh(content_type="model/gltf-binary", mesh=glb)
+            for link, glb in models.items()
+        }
 
     async def set_manual_mode(
         self, manual_mode: bool, enabled_for: int = 0, **kwargs
