@@ -65,6 +65,19 @@ def test_frame_wins_over_position_attr():
     assert attrs["position"] == [3.0, 0.0, 0.0]
 
 
+def test_frame_with_a_non_world_parent_is_not_a_spawn_pose():
+    # e.g. a URDF robot's loader arm framed under a sibling arm ("lift"): the
+    # translation is relative to that parent, so spawning the robot root there
+    # laid the whole robot on its side, floating.
+    cfg = ComponentConfig(name="torso")
+    cfg.frame.parent = "lift"
+    cfg.frame.translation.z = 560
+    cfg.frame.orientation.quaternion.w = 0.7071
+    cfg.frame.orientation.quaternion.x = 0.7071
+    attrs = apply_frame_to_attrs(cfg, {"position": [1, 2, 0]})
+    assert attrs == {"position": [1, 2, 0]}
+
+
 def test_articulation_pose_becomes_reset_default_and_current_pose():
     events = []
 

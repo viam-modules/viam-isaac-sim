@@ -68,7 +68,11 @@ def apply_frame_to_attrs(
     config: ComponentConfig, attrs: Dict[str, Any]
 ) -> Dict[str, Any]:
     """Fold the frame config into the spawn attrs (frame wins over the
-    legacy position/orientation attributes)."""
+    legacy position/orientation attributes). A frame under another component
+    is relative to it, not a world pose, so it leaves the attrs alone (e.g. a
+    URDF robot's loader arm framed under a sibling arm)."""
+    if config.HasField("frame") and config.frame.parent not in ("", "world"):
+        return attrs
     position, quat = frame_pose(config)
     if position is not None:
         attrs["position"] = list(position)
