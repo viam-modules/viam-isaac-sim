@@ -209,3 +209,11 @@ def test_camera_orientation_still_rejects_a_real_mismatch():
             camera,
             {"parent_prim": "/World/x", "local_orientation_wxyz": list(wanted)},
         )
+
+
+def test_camera_orientation_rejects_nan_readback():
+    from isaac_module.sim_manager import _quaternions_close
+
+    nan = float("nan")
+    assert not _quaternions_close((nan, nan, nan, nan), (1.0, 0.0, 0.0, 0.0))
+    assert not _quaternions_close((1.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0))

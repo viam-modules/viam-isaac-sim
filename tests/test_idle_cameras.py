@@ -273,4 +273,35 @@ def test_read_after_resume_waits_three_rendered_steps(mock_sim):
         return start, handle._read(lambda: mock_sim._loop_index)
 
     start, fut = mock_sim.run(task)
-    assert fut.result(timeout=5) - start >= 2  # served in the 3rd step's flush
+    # steps=n resolves in the flush of iteration start + n - 1
+    assert fut.result(timeout=5) - start == IsaacCameraHandle.RESUME_STEPS - 1
+    assert IsaacCameraHandle.RESUME_STEPS == 3
+
+
+def test_pause_without_render_product_still_pauses_and_warns_once(caplog):
+    from isaac_module.sim_manager import IsaacCameraHandle
+
+    cam = FakeCam()  # no _render_product: e.g. a different Isaac version
+    handle = IsaacCameraHandle(None, cam)
+    with caplog.at_level("WARNING"):
+        handle.pause()
+        handle.resume()
+        handle.pause()
+    assert cam.calls == ["pause", "resume", "pause"]
+    assert handle.paused is True
+    assert sum("render product" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_pause_marks_paused_even_if_disabling_rendering_fails():
+    from isaac_module.sim_manager import IsaacCameraHandle
+
+    cam = FakeRenderedCam()
+
+    def boom(enabled):
+        raise RuntimeError("hydra texture gone")
+
+    cam._render_product.hydra_texture.set_updates_enabled = boom
+    handle = IsaacCameraHandle(None, cam)
+    with pytest.raises(RuntimeError):
+        handle.pause()
+    assert handle.paused is True  # the idle tick won't retry it every step

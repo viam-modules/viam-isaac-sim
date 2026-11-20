@@ -894,11 +894,13 @@ def _quaternions_close(actual: Sequence[float], expected: Sequence[float]) -> bo
     rotations in float32 in USD camera axes, where a frame near 180 deg in
     Viam/ROS axes is near identity; float32 quantizes such a tiny angle by up
     to ~7e-4 rad, so per-component checks reject poses that did apply."""
+    if len(actual) != 4 or len(expected) != 4:
+        return False
     dot = sum(float(a) * float(e) for a, e in zip(actual, expected))
     norms = math.sqrt(sum(float(a) ** 2 for a in actual)) * math.sqrt(
         sum(float(e) ** 2 for e in expected)
     )
-    if len(actual) != 4 or len(expected) != 4 or norms == 0.0:
+    if not (math.isfinite(dot) and math.isfinite(norms)) or norms == 0.0:
         return False
     return 2.0 * math.acos(min(1.0, abs(dot) / norms)) <= 1e-3
 
@@ -5554,6 +5556,7 @@ class IsaacCameraHandle(CameraHandle):
         self.last_read = time.monotonic()
         self.paused = False
         self.fresh_from = 0  # first _loop_index at which a read is fresh
+        self._warned_no_texture = False
 
     def _set_rendering(self, enabled: bool) -> None:
         # Isaac's Camera.pause() only drops its Python data callback; the
@@ -5562,13 +5565,23 @@ class IsaacCameraHandle(CameraHandle):
         # ponytail: reaches into Camera._render_product; no public accessor.
         product = getattr(self._cam, "_render_product", None)
         texture = getattr(product, "hydra_texture", None)
-        if texture is not None:
-            texture.set_updates_enabled(enabled)
+        if texture is None:
+            if not self._warned_no_texture:
+                self._warned_no_texture = True
+                LOGGER.warning(
+                    "camera %s has no render product to switch off; pausing it "
+                    "won't save its render cost",
+                    getattr(self._cam, "prim_path", "?"),
+                )
+            return
+        texture.set_updates_enabled(enabled)
 
     def pause(self) -> None:
+        # paused first: if switching rendering off raises, the idle tick
+        # must not retry (and log) every step
+        self.paused = True
         self._cam.pause()
         self._set_rendering(False)
-        self.paused = True
 
     def resume(self) -> None:
         self._set_rendering(True)
