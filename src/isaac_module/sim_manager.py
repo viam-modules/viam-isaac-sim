@@ -48,6 +48,7 @@ from .world_state import (
 
 if TYPE_CHECKING:
     from .lidar import LidarHandle
+    from .swerve import SwerveDrive
 
 LOGGER = getLogger("viam-isaac-sim")
 
@@ -699,6 +700,51 @@ def _merge_position_gains(
             index = list(dof_names).index(name)
             flat_kp[index], flat_kd[index] = stiffness, damping
     return kps, kds
+
+
+SWERVE_WHEEL_DAMPING = 10.0  # N m s/rad: a swerve wheel's velocity drive gain
+# 1/s: a stopped swerve wheel's speed target per radian off where it stopped, so
+# with the damping it holds like a spring (100 N m/rad) instead of creeping
+SWERVE_BRAKE_GAIN = 10.0
+# kg m^2 added to each swerve wheel's joint: a wheel's own ~1e-4 against the
+# robot's tens of kg is a mass ratio the contact solver can't resolve
+SWERVE_WHEEL_ARMATURE = 0.01
+SWERVE_GOAL_MIN_WAIT_S = 120.0  # wall-clock budget of a MoveStraight/Spin: this
+SWERVE_GOAL_WAIT_FACTOR = 20.0  # plus this many times its nominal duration
+
+
+def _velocity_drives(
+    root_prim: Any,
+    art: Any,
+    joints: Sequence[str],
+    damping: float,
+    rebuild: Callable[[], None],
+) -> None:
+    """Make the named revolute joints force velocity drives: stiffness 0,
+    `damping` N m per rad/s. Written to USD too (where angular drive gains are
+    per DEGREE), so a world reset that re-reads the stage keeps them. Force, not
+    the URDF import's acceleration drives: those scale the gain by the joint's
+    own inertia, a wheel's ~1e-4 kg m^2, so the wheel can't move the robot.
+    PhysX reads a drive's type only when it builds the articulation, so
+    `rebuild` (a world reset) runs between authoring and the gains."""
+    from pxr import Sdf, Usd, UsdPhysics
+
+    wanted = set(joints)
+    for prim in Usd.PrimRange(root_prim):
+        if prim.GetName() in wanted and prim.IsA(UsdPhysics.RevoluteJoint):
+            drive = UsdPhysics.DriveAPI.Apply(prim, "angular")
+            drive.CreateTypeAttr().Set("force")
+            drive.CreateStiffnessAttr().Set(0.0)
+            drive.CreateDampingAttr().Set(damping * math.pi / 180.0)
+            drive.CreateTargetPositionAttr().Set(0.0)
+            prim.CreateAttribute("physxJoint:armature", Sdf.ValueTypeNames.Float).Set(SWERVE_WHEEL_ARMATURE)
+    rebuild()
+    controller = art.get_articulation_controller()
+    kps, kds = controller.get_gains()
+    kps, kds = _merge_position_gains(
+        list(art.dof_names), kps, kds, {j: (0.0, damping) for j in joints}
+    )
+    controller.set_gains(kps=kps, kds=kds)
 
 
 def _usd_drive_gains(root_prim: Any, names: set[str]) -> dict[str, tuple[float, float]]:
@@ -2458,7 +2504,12 @@ class SimManager:
             if isinstance(handle, IsaacArmHandle):
                 handle._target = None
                 handle._commanded = None
+        swerve = [h for _, h in list(self._handles.values()) if isinstance(h, SwerveBaseHandle)]
+        for handle in swerve:  # before: no physics step during the reset drives a stale goal
+            handle.on_world_reset()
         self.world.reset()
+        for handle in swerve:  # after: brake where the reset put the wheels
+            handle.on_world_reset()
         self._restore_shared_base_gains()
         for _, handle in list(self._handles.values()):
             if isinstance(handle, IsaacArmHandle):
@@ -3853,6 +3904,8 @@ class SimManager:
 
         if attrs.get("planar_joints"):
             return self._create_planar_base_isaac(name, attrs)
+        if "swerve_modules" in attrs:
+            return self._create_swerve_base_isaac(name, attrs)
         usd, meta = self._resolve_usd(attrs)
         prim_path = attrs.get("prim_path") or f"/World/{_prim_name(name)}"
         wheel_joints = attrs.get("wheel_joints") or meta.get("wheel_joints")
@@ -3940,6 +3993,59 @@ class SimManager:
         if missing:
             raise ValueError(f"base {name!r}: joints {missing} not in DOFs: {names}")
         handle = PlanarJointBaseHandle(self, art, [names.index(j) for j in joints])
+        self.world.add_physics_callback(f"{name}_drive", handle._on_physics_step)
+        return handle
+
+    def _create_swerve_base_isaac(self, name: str, attrs: dict[str, Any]) -> "SwerveBaseHandle":
+        """A swerve base rolling on its own wheels: the steer and drive joints of
+        the articulation an arm on the same prim_path loaded, floating on the floor."""
+        from .swerve import SwerveDrive, parse_swerve_attrs, stage_modules
+
+        try:
+            cfg = parse_swerve_attrs(attrs)
+        except ValueError as exc:
+            raise ValueError(f"base {name!r}: {exc}") from exc
+        prim_path = attrs.get("prim_path") or f"/World/{_prim_name(name)}"
+        art = self._arm_articulations.get(prim_path)
+        if art is None:
+            raise ValueError(
+                f"base {name!r}: swerve_modules drives the articulation an arm on "
+                f"{prim_path} loads; configure that arm and add it to depends_on"
+            )
+        names = list(art.dof_names)
+        pairs = cfg["pairs"]
+        missing = [j for pair in pairs for j in pair if j not in names]
+        if missing:
+            raise ValueError(f"base {name!r}: joints {missing} not in DOFs: {names}")
+        chassis_path = f"{prim_path}/{cfg['chassis_link']}"
+        self._require_prim(chassis_path)
+        root = self._isaac.get_prim_at_path(prim_path)
+        modules = stage_modules(root, chassis_path, pairs, cfg["forward_axis"])
+        wheels = [d for _, d in pairs]
+        damping = float(attrs.get("wheel_drive_damping", SWERVE_WHEEL_DAMPING))
+        # ponytail: the reset returns the robot to its spawn pose; fine at boot,
+        # a jump if the base is reconfigured mid-session
+        _velocity_drives(root, art, wheels, damping, self._reset_world)
+        drive = SwerveDrive(
+            modules,
+            max_linear_mps=float(attrs.get("max_linear_mps", 0.5)),
+            max_angular_rps=float(attrs.get("max_angular_rps", 2.0)),
+        )
+        handle = SwerveBaseHandle(
+            self,
+            art,
+            self._isaac.SingleXFormPrim(chassis_path),
+            drive,
+            [names.index(s) for s, _ in pairs],
+            [names.index(d) for d in wheels],
+            cfg["wheel_radius_m"],
+            cfg["forward_axis"],
+        )
+        for m in modules:
+            LOGGER.info(
+                "base %s: swerve module %s/%s at (%.3f, %.3f) m, rolls %.0f deg at steer 0",
+                name, m.steer, m.drive, *m.position, math.degrees(m.roll0),
+            )
         self.world.add_physics_callback(f"{name}_drive", handle._on_physics_step)
         return handle
 
@@ -5888,6 +5994,152 @@ class PlanarJointBaseHandle(BaseHandle):
     def is_moving(self) -> bool:
         with self._lock:
             return self._cmd != (0.0, 0.0, 0.0)
+
+
+class SwerveBaseHandle(BaseHandle):
+    """A swerve base on its own wheels: every physics step reads the chassis
+    pose, and the SwerveDrive controller sets each steer joint's position
+    target and each drive joint's velocity target (rad, rad/s)."""
+
+    def __init__(
+        self,
+        sim: SimManager,
+        articulation,
+        chassis,
+        drive: "SwerveDrive",
+        steer_indices: list[int],
+        drive_indices: list[int],
+        wheel_radius: float,
+        forward_axis: str,
+    ) -> None:
+        from .swerve import FORWARD_AXES
+
+        self._sim = sim
+        self._art = articulation
+        self._chassis = chassis
+        self._drive = drive
+        self._steer = steer_indices
+        self._wheels = drive_indices
+        self.wheel_radius = wheel_radius
+        xs = [m.position[0] for m in drive.modules]
+        # the track: the modules' spread across the base (Viam x), reported
+        # as Base.Properties width like the differential bases' wheel_base
+        self.wheel_base = max(xs) - min(xs)
+        self._forward = (*FORWARD_AXES[forward_axis], 0.0)
+        self._lock = threading.Lock()
+        self._warned = False
+        self._brake: Any = None  # wheel angles a stopped base holds
+
+    def _on_physics_step(self, step_size: float) -> None:
+        import numpy as np
+
+        from .spatial import quat_rotate
+
+        try:
+            position, orientation = _pose_floats(self._chassis.get_world_pose())
+            forward = quat_rotate(orientation, self._forward)  # type: ignore[arg-type]
+            yaw = math.atan2(forward[1], forward[0])
+            measured = [float(v) for v in self._art.get_joint_positions(joint_indices=self._steer)]
+            with self._lock:
+                angles, speeds = self._drive.step(
+                    position[0], position[1], yaw, float(step_size),
+                    float(self._sim.world.current_time), measured,
+                )
+                moving = self._drive.moving
+            wheel_speeds = np.asarray(speeds, dtype=float) / self.wheel_radius
+            if moving:
+                self._brake = None
+            else:
+                # stopped: brake each wheel where it stopped (damping alone lets a
+                # shove, or the lift's reaction, roll the base away)
+                wheels = np.asarray(self._art.get_joint_positions(joint_indices=self._wheels), dtype=float)
+                if self._brake is None:
+                    self._brake = wheels
+                # continuous joints report (-pi, pi]: take the short way round
+                error = np.remainder(wheels - self._brake + math.pi, 2 * math.pi) - math.pi
+                wheel_speeds = -SWERVE_BRAKE_GAIN * error
+            # the controller's angles are unbounded; send each joint the
+            # equivalent angle nearest where it is (a reset puts it back at 0)
+            targets = [q + math.remainder(a - q, 2 * math.pi) for a, q in zip(angles, measured)]
+            action = self._sim._isaac.ArticulationAction
+            self._art.apply_action(
+                action(joint_positions=np.asarray(targets, dtype=float), joint_indices=self._steer)
+            )
+            self._art.apply_action(
+                action(joint_velocities=wheel_speeds, joint_indices=self._wheels)
+            )
+        except Exception:
+            if not self._warned:
+                LOGGER.exception("error driving swerve base")
+                self._warned = True
+
+    def set_velocity(
+        self, linear_mps: float, angular_rps: float, left_mps: float = 0.0
+    ) -> None:
+        with self._lock:
+            self._drive.set_velocity(-float(left_mps), float(linear_mps), float(angular_rps))
+
+    def on_world_reset(self) -> None:
+        with self._lock:
+            self._drive.reset()
+            self._brake = None
+
+    def status(self) -> dict[str, Any]:
+        """Each module's steer angle (measured and commanded), wheel speed and
+        the articulation's (stiffness, damping) on both joints."""
+        import numpy as np
+
+        def read():
+            gains = self._art.get_articulation_controller().get_gains()
+            return (
+                [float(v) for v in self._art.get_joint_positions(joint_indices=self._steer)],
+                [float(v) for v in self._art.get_joint_velocities(joint_indices=self._wheels)],
+                [float(v) for v in self._art.get_joint_positions(joint_indices=self._wheels)],
+                [np.asarray(g, dtype=float).reshape(-1) for g in gains],
+            )
+
+        steer, wheels, wheel_q, (kps, kds) = self._sim.run(read)
+        with self._lock:
+            targets, moving = list(self._drive.angles), self._drive.moving
+        return {
+            "moving": moving,
+            "modules": [
+                {
+                    "steer": m.steer,
+                    "drive": m.drive,
+                    "position_m": list(m.position),
+                    "roll0_deg": math.degrees(m.roll0),
+                    "steer_deg": math.degrees(steer[i]),
+                    "steer_target_deg": math.degrees(targets[i]),
+                    "wheel_rad_s": wheels[i],
+                    "wheel_rad": wheel_q[i],
+                    "steer_gains": [float(kps[self._steer[i]]), float(kds[self._steer[i]])],
+                    "wheel_gains": [float(kps[self._wheels[i]]), float(kds[self._wheels[i]])],
+                }
+                for i, m in enumerate(self._drive.modules)
+            ],
+        }
+
+    def run_goal(self, kind: str, target: float, rate: float) -> None:
+        """MoveStraight (m) / Spin (rad), closed loop on the chassis pose; blocks
+        until it lands, and raises if it stalls or is stopped or superseded."""
+        with self._lock:
+            goal = self._drive.start_goal(kind, target, rate)
+        # wall clock: generous, for a slow sim; a paused one fails the move
+        timeout = SWERVE_GOAL_MIN_WAIT_S + SWERVE_GOAL_WAIT_FACTOR * abs(target / rate)
+        if not goal.done.wait(timeout):
+            self.stop()
+            raise TimeoutError(f"base move didn't finish within {timeout:.0f} s (is the sim paused?)")
+        if goal.error is not None:
+            raise goal.error
+
+    def stop(self) -> None:
+        with self._lock:
+            self._drive.stop()
+
+    def is_moving(self) -> bool:
+        with self._lock:
+            return self._drive.moving
 
 
 def planar_step(

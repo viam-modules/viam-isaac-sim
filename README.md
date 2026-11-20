@@ -25,7 +25,7 @@ What it is/does
 | `viam-labs:isaac-sim:gripper` | `gripper` | Exposes a supported parallel gripper, including the Lite 6's integrated gripper. |
 | `viam-labs:isaac-sim:camera` | `camera` | Creates (or attaches to) a camera prim and serves RGB, and optionally depth and point clouds. |
 | `viam-labs:isaac-sim:lidar` | `camera` | An RTX lidar (RPLidar S2E, Ouster OS1-32) served as a point-cloud camera. |
-| `viam-labs:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it. |
+| `viam-labs:isaac-sim:base` | `base` | Spawns a differential-drive robot (e.g. jetbot) and drives it, or drives a robot's planar joints or swerve modules. |
 | `viam-labs:isaac-sim:motor` | `motor` | A thruster that pushes a rigid body (a floating prop, say); two of them steer by differential thrust. |
 | `viam-labs:isaac-sim:movement_sensor` | `movement_sensor` | GPS, IMU and compass readings from a rigid body. |
 
@@ -651,6 +651,85 @@ set `fixed_base_link` on that arm (`"world"` there) so the root is fixed to the
 world, and give it `kinematics/ridgeback_planar.urdf` as `kinematics_url` so an
 arm parented to it in the frame system follows the base. Arms report prismatic
 joints in millimeters and revolute joints in degrees.
+
+#### Swerve
+
+Swerve mode drives a robot on its own wheels: `swerve_modules` lists each
+module's steering and wheel joints of the articulation an arm on the same
+`prim_path` loads (add that arm to `depends_on`). Every physics step each module
+turns to its share of the body velocity (v + ω × r, r the steer axis from the
+chassis) and its wheel rolls at that speed. A module turns the short way and
+reverses its wheel rather than steering past 90°, steers to the commanded angle
+(never to the measured one, which wobbles), and drives only its aligned share
+while it turns. Moving without turning holds the heading the base set off on, so
+direction changes don't twist it.
+
+```json
+{
+  "name": "mabel-base", "model": "viam-labs:isaac-sim:base", "type": "base",
+  "depends_on": ["torso"],
+  "attributes": {
+    "world": "sim-world", "prim_path": "/World/mabel",
+    "swerve_modules": [
+      {"steer_joint": "fl_steer", "drive_joint": "fl_drive"},
+      {"steer_joint": "fr_steer", "drive_joint": "fr_drive"},
+      {"steer_joint": "b_steer", "drive_joint": "b_drive"}
+    ],
+    "wheel_radius_m": 0.038, "forward_axis": "-x",
+    "max_linear_mps": 0.5, "max_angular_rps": 1.0
+  }
+}
+```
+
+| attribute | |
+|---|---|
+| `swerve_modules` | `[{steer_joint, drive_joint}, ...]`, at least two. Module positions and wheel directions are read from the stage at spawn (the joints' frames at steer 0), so any steer angle the robot starts at is fine |
+| `wheel_radius_m` | required |
+| `forward_axis` | the robot file's forward: `+x` (default, ROS), `-x`, `+y`, `-y` |
+| `chassis_link` | the link the modules are fixed to, under `prim_path`; its pose is the base's pose. Default `base_link` |
+| `max_linear_mps`, `max_angular_rps` | clamp `SetVelocity` (the linear part as one vector) and scale `SetPower`. Defaults 0.5, 2.0 |
+| `wheel_drive_damping` | the wheels' velocity drive gain, N·m·s/rad (default 10): the torque per rad/s of speed error, up to the joint's effort limit |
+
+Same API as the other bases: `SetVelocity` takes `linear.y` forward mm/s,
+`linear.x` right mm/s and `angular.z` left deg/s; `SetPower` the same in
+[-1, 1]. `MoveStraight` and `Spin` are closed loop on the chassis pose: they
+brake onto the target along the start heading (holding it), and fail if the
+base makes no progress for 3 s of sim time (blocked), on `Stop`, a new
+command or a world reset, or when the sim doesn't finish them within a
+generous wall-clock budget (paused). A world reset also clears a stopped base's
+brake and held heading.
+
+A stopped base brakes each wheel where it stopped (a velocity target pulling it
+back, like a 100 N·m/rad spring), so a shove or the lift's reaction doesn't
+roll it away. DoCommand `{"command": "status"}` reports each module's steer
+angle (measured and commanded), wheel angle and speed, and drive gains;
+`{"command": "set_velocity", "linear": {"x": 300}, "angular": {"z": 0},
+"duration_s": 2}` holds a `SetVelocity` for that much sim time and then stops,
+for clients whose `SetVelocity` is stopped when the call's session ends; it
+returns early, without stopping, when another motion command replaces it, and
+when the base stops.
+
+Joint drives: steer joints keep the position drives the URDF import gave them.
+At attach the module makes each drive joint a **force** velocity drive,
+stiffness 0 and `wheel_drive_damping`, with 0.01 kg·m² joint armature, and
+resets the world once so PhysX rebuilds the articulation with them (it reads a
+drive's type only then). That reset returns the robot to its spawn pose, clears
+the targets of arms already attached to it (they hold their reset pose), and
+puts props spawned before the base back at their spawn poses; configure the
+base at boot rather than mid-session. Why: the URDF
+import writes acceleration drives, whose gain is scaled by the joint's own
+inertia (a wheel's ~1e-4 kg·m²), so the wheels had no torque; and a wheel that
+light under a 40 kg robot is a mass ratio the contact solver can't resolve, so
+without armature the wheels skidded and the base slid instead of rolling (spins
+stalled). The USD gets the gains too, where angular drive gains are per
+**degree** (damping × π/180), so later resets keep them.
+
+The robot must float on its wheels: load it with no `urdf_fix_base` and no
+`fixed_base_link`, with wheel colliders, at a spawn `position` that puts the
+wheels on (or just above) the floor. The frame system does not follow a
+wheeled base: frames for the robot's arms and cameras are static, so parent
+them to `world` at the spawn pose and expect them to be right only there (the
+same limitation viam-mujoco-sim has).
 
 ### Floating props, thrusters and movement sensors
 
