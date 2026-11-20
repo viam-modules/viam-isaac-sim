@@ -295,13 +295,36 @@ unchanged. `max_joint_deg_s2` sets the
 positive finite per-joint acceleration limit reported to trajectory
 parameterizers. `is_moving_velocity_threshold_rad_s` sets the per-joint velocity
 noise floor used by `IsMoving`; it defaults to `0.01` rad/s and must be finite
-and non-negative. Known UR assets default to `wrist_3_link`; `lite6` selects
+and non-negative. `Stop` holds the measured position, except when no
+trajectory is running and every joint is within 2° of its current target: then
+it keeps the target, so a settled arm doesn't latch drive jitter as its new
+pose. Known UR assets default to `wrist_3_link`; `lite6` selects
 NVIDIA's integrated gripper variant and defaults to its gripper body.
 `uf850_g2` is a UFACTORY 850 with its Gripper G2, shipped with this module
 rather than the Isaac content server (`src/isaac_module/assets/uf850_g2`, with
 its source and license in `NOTICE.md`); it defaults to `link6`, the flange.
 `initial_joint_positions_deg` (known assets, in their joint order) spawns the
 arm at that pose instead of zero joints, and a world `reset` returns it there.
+
+`usd_path` can also point at a `.urdf`: the module imports it with Isaac's
+URDF importer into a USD in its data directory (`VIAM_MODULE_DATA`), cached by
+the URDF's contents, and loads that. Mesh paths resolve relative to the URDF
+file. Links stay separate prims under `prim_path` (fixed joints are not
+merged), self-collision is off, and joints get position drives tuned like the
+importer's joint panel: `urdf_drive: {"natural_frequency": 100,
+"damping_ratio": 1.0}` by default (rad/s; stiffness = natural_frequency², or
+times the joint inertia for force drives; damping = 2 × natural_frequency ×
+damping_ratio, so 1.0 is critically damped). The importer's own default (25
+rad/s, damping from `<dynamics damping>`) lets a humanoid torso sag. URDF
+effort limits cap the drive force. The root floats unless `urdf_fix_base:
+true`; `fixed_base_link` pins any link instead. The first import of a large
+robot can take minutes; it is cached, so later starts are fast. Editing meshes next to
+the URDF doesn't invalidate the cache: edit the URDF or delete the cached
+`urdf-*` directory. Set `max_joint_deg_s` on
+URDF arms that carry other limbs (a humanoid torso): an unramped step saturates
+the drive and can slam the joint into its limit, where it may stay wedged; a
+ramp (e.g. 90) avoids it. A lower `natural_frequency` also avoids it but lets
+the joint sag under load, and a smaller `physics_dt` does not help.
 
 `joint_names` (optional, non-empty list of unique strings) names the
 articulation DOFs this arm drives, in order. It overrides a known asset's
