@@ -9,7 +9,7 @@ run.sh: run.nodetect.sh
 
 test:
 	# `python -m` here is load bearing for allowing imports to work
-	uv run --with pytest python -m pytest
+	uv run --group test --with pytest python -m pytest
 
 lint:
 	uv run --with ruff ruff check .

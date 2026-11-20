@@ -395,7 +395,7 @@ those hulls by default, or with `planning_geometry: "mesh"` as the hulls
 themselves, PLY with `GetKinematics`. The base link carries no geometry: it
 belongs to the limb above. `visual_models: true` serves each link's visible
 prims as an untextured GLB through `Get3DModels`, for the 3D viewer: up to
-10,000 triangles a link (~0.5 MB), decimated past that by quadric
+10,000 triangles a link (~470 KB of GLB), decimated past that by quadric
 decimation (with `fast_simplification` installed) or else by vertex
 clustering, welded and shaded smooth with creases kept, never a hull. It needs
 `trimesh`, which comes with Isaac Sim; without it `Get3DModels` logs a warning

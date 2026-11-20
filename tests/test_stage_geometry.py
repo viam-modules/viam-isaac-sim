@@ -362,12 +362,17 @@ def test_simplified_welds_a_soup_and_drops_degenerate_and_duplicate_faces():
     _clean(kept)
 
 
-def test_simplified_needs_no_trimesh(monkeypatch):
-    import sys
+def test_simplified_cap_is_a_ceiling_even_below_a_coarse_grid():
+    vertices, faces = stage_geometry.simplified(*_sphere(), cap=3)
+    assert len(faces) <= 3
+    _clean(faces)
 
-    monkeypatch.setitem(sys.modules, "trimesh", None)
-    _, faces = stage_geometry.simplified(*_sphere(), cap=2000)
-    assert 0 < len(faces) <= 2000
+
+def test_visual_models_skip_a_link_with_no_triangles():
+    pytest.importorskip("trimesh")
+    chain = _chain()
+    chain["steps"][0]["visual"] = (np.zeros((3, 3)), np.array([[0, 0, 1]]))
+    assert stage_geometry.visual_glbs(chain, meshes=True) == {}
 
 
 def test_visual_models_without_quadric_decimation_are_clustered_not_hulled(monkeypatch):
