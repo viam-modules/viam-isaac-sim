@@ -728,6 +728,12 @@ def _usd_drive_gains(root_prim: Any, names: set[str]) -> dict[str, tuple[float, 
     return gains
 
 
+def _pose_floats(pose: Any) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """((x,y,z), (w,x,y,z)) as plain floats from an Isaac get_world_pose()."""
+    position, rotation = pose
+    return tuple(float(v) for v in position[:3]), tuple(float(v) for v in rotation[:4])
+
+
 def _joint_parent_link(root_prim: Any, joint_name: str) -> str | None:
     """Path of the link (body0) the named joint under root_prim hangs off."""
     stack = [root_prim]
@@ -3003,10 +3009,14 @@ class SimManager:
                     )
                 # The loader was closed (e.g. renamed): its prims are still in
                 # the stage, so take over the articulation instead of re-loading.
-                handle = self._isaac_arm_handle(name, attrs, meta, shared, prim_path)
+                handle = self._isaac_arm_handle(
+                    name, attrs, meta, shared, prim_path, link_base=True
+                )
                 self._arm_usd_owners[prim_path] = name
                 return handle
-            return self._isaac_arm_handle(name, attrs, meta, shared, prim_path)
+            return self._isaac_arm_handle(
+                name, attrs, meta, shared, prim_path, link_base=True
+            )
         if usd:
             self._isaac.add_reference_to_stage(usd_path=usd, prim_path=prim_path)
             self._require_prim(prim_path)
@@ -3075,7 +3085,14 @@ class SimManager:
                 getattr(getattr(view, "shared_metatype", None), "fixed_base", "unknown"),
             )
         self._restore_shared_base_gains()
-        handle = self._isaac_arm_handle(name, attrs, meta, art, prim_path)
+        handle = self._isaac_arm_handle(
+            name,
+            attrs,
+            meta,
+            art,
+            prim_path,
+            link_base=str(attrs.get("usd_path") or "").lower().endswith(".urdf"),
+        )
         self._arm_articulations[prim_path] = art
         if usd:
             self._arm_usd_owners[prim_path] = name
@@ -3088,7 +3105,11 @@ class SimManager:
         meta: dict[str, Any],
         art: Any,
         prim_path: str,
+        link_base: bool = False,
     ) -> "IsaacArmHandle":
+        """link_base: report GetEndPosition against the link the first joint
+        hangs off (URDF robots, arms sharing an articulation) instead of the
+        spawn pose. Known assets always use the spawn pose."""
         ee = None
         ee_path = attrs.get("end_effector_prim")
         if not ee_path and meta.get("end_effector_link"):
@@ -3136,10 +3157,11 @@ class SimManager:
         if hasattr(root, "GetStage"):  # a real USD prim (unit-test stand-ins lack one)
             sliding = _prismatic_joint_names(root)
             handle.prismatic = tuple(joint in sliding for joint in handle.joint_names())
-            if not meta:  # known assets keep their spawn pose as the base
-                base_link = _joint_parent_link(root, handle.joint_names()[0])
-                if base_link:
-                    handle._base_prim = self._isaac.SingleXFormPrim(base_link)
+        # (stand-in roots in some unit tests have no prim API)
+        if link_base and not meta and handle.joint_names() and hasattr(root, "GetChildren"):
+            base_link = _joint_parent_link(root, handle.joint_names()[0])
+            if base_link:  # else the spawn pose stays the base
+                handle._base_prim = self._isaac.SingleXFormPrim(base_link)
         return handle
 
     def create_gripper(self, name: str, attrs: dict[str, Any]) -> "GripperHandle":
@@ -4349,19 +4371,19 @@ class ArmHandle:
         link its first joint hangs off (its kinematics base)."""
         from .spatial import pose_in_frame
 
-        position, rotation = self.get_end_pose()
         if self._base_prim is None:
+            position, rotation = self.get_end_pose()
             return pose_in_frame(
                 self._base_position, self._base_orientation, position, rotation
             )
-        # ponytail: base read after the end pose, a step apart at worst
-        base_position, base_rotation = self._sim.run(self._base_prim.get_world_pose)
-        return pose_in_frame(
-            tuple(float(v) for v in base_position),
-            tuple(float(v) for v in base_rotation),
-            position,
-            rotation,
-        )
+
+        def _read():  # both poses from the same physics step
+            base_position, base_rotation = _pose_floats(self._base_prim.get_world_pose())
+            return pose_in_frame(
+                base_position, base_rotation, *self._end_pose_on_sim_thread()
+            )
+
+        return self._sim.run(_read)
 
     def capture_state(self):
         """Return positions, velocities, target, and EE pose on the sim thread."""
@@ -4788,14 +4810,14 @@ class IsaacArmHandle(ArmHandle):
                 "set end_effector_prim in the arm config to report end position"
             )
 
-        def _pose():
-            pos, quat = self._ee.get_world_pose()
-            return (
-                (float(pos[0]), float(pos[1]), float(pos[2])),
-                (float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])),
-            )
+        return self._sim.run(self._end_pose_on_sim_thread)
 
-        return self._sim.run(_pose)
+    def _end_pose_on_sim_thread(self):
+        if self._ee is None:
+            raise NotImplementedError(
+                "set end_effector_prim in the arm config to report end position"
+            )
+        return _pose_floats(self._ee.get_world_pose())
 
     def capture_state(self):
         positions = [
