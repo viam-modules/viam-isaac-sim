@@ -728,6 +728,26 @@ def _usd_drive_gains(root_prim: Any, names: set[str]) -> dict[str, tuple[float, 
     return gains
 
 
+def _pose_floats(pose: Any) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """((x,y,z), (w,x,y,z)) as plain floats from an Isaac get_world_pose()."""
+    position, rotation = pose
+    return tuple(float(v) for v in position[:3]), tuple(float(v) for v in rotation[:4])
+
+
+def _joint_parent_link(root_prim: Any, joint_name: str) -> str | None:
+    """Path of the link (body0) the named joint under root_prim hangs off."""
+    stack = [root_prim]
+    while stack:
+        prim = stack.pop()
+        if prim.GetName() == joint_name:
+            rel = prim.GetRelationship("physics:body0")
+            targets = rel.GetTargets() if rel else []
+            if targets:
+                return str(targets[0])
+        stack.extend(prim.GetChildren())
+    return None
+
+
 def _prismatic_joint_names(root_prim: Any) -> set[str]:
     """Names of the prismatic joints under an articulation (DOF names in Isaac)."""
     from pxr import Usd, UsdPhysics
@@ -2989,10 +3009,14 @@ class SimManager:
                     )
                 # The loader was closed (e.g. renamed): its prims are still in
                 # the stage, so take over the articulation instead of re-loading.
-                handle = self._isaac_arm_handle(name, attrs, meta, shared, prim_path)
+                handle = self._isaac_arm_handle(
+                    name, attrs, meta, shared, prim_path, link_base=True
+                )
                 self._arm_usd_owners[prim_path] = name
                 return handle
-            return self._isaac_arm_handle(name, attrs, meta, shared, prim_path)
+            return self._isaac_arm_handle(
+                name, attrs, meta, shared, prim_path, link_base=True
+            )
         if usd:
             self._isaac.add_reference_to_stage(usd_path=usd, prim_path=prim_path)
             self._require_prim(prim_path)
@@ -3061,7 +3085,14 @@ class SimManager:
                 getattr(getattr(view, "shared_metatype", None), "fixed_base", "unknown"),
             )
         self._restore_shared_base_gains()
-        handle = self._isaac_arm_handle(name, attrs, meta, art, prim_path)
+        handle = self._isaac_arm_handle(
+            name,
+            attrs,
+            meta,
+            art,
+            prim_path,
+            link_base=str(attrs.get("usd_path") or "").lower().endswith(".urdf"),
+        )
         self._arm_articulations[prim_path] = art
         if usd:
             self._arm_usd_owners[prim_path] = name
@@ -3074,7 +3105,11 @@ class SimManager:
         meta: dict[str, Any],
         art: Any,
         prim_path: str,
+        link_base: bool = False,
     ) -> "IsaacArmHandle":
+        """link_base: report GetEndPosition against the link the first joint
+        hangs off (URDF robots, arms sharing an articulation) instead of the
+        spawn pose. Known assets always use the spawn pose."""
         ee = None
         ee_path = attrs.get("end_effector_prim")
         if not ee_path and meta.get("end_effector_link"):
@@ -3122,6 +3157,11 @@ class SimManager:
         if hasattr(root, "GetStage"):  # a real USD prim (unit-test stand-ins lack one)
             sliding = _prismatic_joint_names(root)
             handle.prismatic = tuple(joint in sliding for joint in handle.joint_names())
+        # (stand-in roots in some unit tests have no prim API)
+        if link_base and not meta and handle.joint_names() and hasattr(root, "GetChildren"):
+            base_link = _joint_parent_link(root, handle.joint_names()[0])
+            if base_link:  # else the spawn pose stays the base
+                handle._base_prim = self._isaac.SingleXFormPrim(base_link)
         return handle
 
     def create_gripper(self, name: str, attrs: dict[str, Any]) -> "GripperHandle":
@@ -4234,6 +4274,7 @@ class ArmHandle:
     _sim: "SimManager"
     _base_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
     _base_orientation: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
+    _base_prim: Any = None  # custom arms: the link the first joint hangs off
     # per joint_names() entry: True for a prismatic joint (native meters, Viam mm);
     # empty means every joint is revolute (native radians, Viam degrees)
     prismatic: tuple[bool, ...] = ()
@@ -4326,13 +4367,23 @@ class ArmHandle:
         self,
     ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
         """The end effector pose in the arm's base frame, as GetEndPosition
-        reports it."""
+        reports it: the spawn pose, or for a custom arm the live pose of the
+        link its first joint hangs off (its kinematics base)."""
         from .spatial import pose_in_frame
 
-        position, rotation = self.get_end_pose()
-        return pose_in_frame(
-            self._base_position, self._base_orientation, position, rotation
-        )
+        if self._base_prim is None:
+            position, rotation = self.get_end_pose()
+            return pose_in_frame(
+                self._base_position, self._base_orientation, position, rotation
+            )
+
+        def _read():  # both poses from the same physics step
+            base_position, base_rotation = _pose_floats(self._base_prim.get_world_pose())
+            return pose_in_frame(
+                base_position, base_rotation, *self._end_pose_on_sim_thread()
+            )
+
+        return self._sim.run(_read)
 
     def capture_state(self):
         """Return positions, velocities, target, and EE pose on the sim thread."""
@@ -4759,14 +4810,14 @@ class IsaacArmHandle(ArmHandle):
                 "set end_effector_prim in the arm config to report end position"
             )
 
-        def _pose():
-            pos, quat = self._ee.get_world_pose()
-            return (
-                (float(pos[0]), float(pos[1]), float(pos[2])),
-                (float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])),
-            )
+        return self._sim.run(self._end_pose_on_sim_thread)
 
-        return self._sim.run(_pose)
+    def _end_pose_on_sim_thread(self):
+        if self._ee is None:
+            raise NotImplementedError(
+                "set end_effector_prim in the arm config to report end position"
+            )
+        return _pose_floats(self._ee.get_world_pose())
 
     def capture_state(self):
         positions = [
@@ -5827,13 +5878,15 @@ def asset_cache_dir() -> Path:
 # ponytail: fixed band; Mabel's torso jitters ~1.2 deg around a reached
 # target. Make it per-arm (path_tolerance_delta_deg) if a real arm needs tighter.
 STOP_KEEPS_TARGET_WITHIN_RAD = math.radians(2.0)
-URDF_IMPORT_VERSION = 1
+URDF_IMPORT_VERSION = 2
 # a cold import of a big robot (Mabel: ~150 meshes) takes minutes, longer than
 # the 120 s spawn budget, so it gets its own
 URDF_IMPORT_TIMEOUT_S = 900.0
-# critically damped and stiff enough to hold a humanoid's torso against gravity;
-# the importer's own default (25 rad/s, damping from <dynamics>) sags
-URDF_DRIVE_DEFAULT = {"natural_frequency": 100.0, "damping_ratio": 1.0}
+# critically damped and stiff enough to hold a humanoid's limbs and lift against
+# gravity (750 rad/s: 562500 per rad, about the stiffness revolute joints got
+# before the per-degree fix); the importer's own default (25 rad/s, damping
+# from <dynamics>) sags
+URDF_DRIVE_DEFAULT = {"natural_frequency": 750.0, "damping_ratio": 1.0}
 
 
 def _urdf_drive(attrs: dict[str, Any]) -> tuple[float, float]:
@@ -5885,7 +5938,8 @@ def _set_urdf_drives(
     """Position-drive gains for every joint, with the importer UI's math:
     stiffness = compute_natural_stiffness (nf^2, times joint inertia for force
     drives), damping = 2 * m_eq * nf * damping_ratio (m_eq = 1, or the joint
-    inertia for force drives)."""
+    inertia for force drives). These are per radian; the importer writes them
+    to USD as-is, where angular drives are per degree, so convert those."""
     joints = robot.joints  # a copy: written back below
     for name, joint in joints.items():
         drive = joint.drive
@@ -5893,10 +5947,13 @@ def _set_urdf_drives(
             continue
         force = drive.drive_type == urdf.UrdfJointDriveType.JOINT_DRIVE_FORCE
         m_eq = joint.inertia if force else 1.0
+        per_unit = 1.0 if joint.type == urdf.UrdfJointType.JOINT_PRISMATIC else math.pi / 180
         drive.natural_frequency = natural_frequency
         drive.damping_ratio = damping_ratio
-        drive.strength = interface.compute_natural_stiffness(robot, name, natural_frequency)
-        drive.damping = 2 * m_eq * natural_frequency * damping_ratio
+        drive.strength = (
+            interface.compute_natural_stiffness(robot, name, natural_frequency) * per_unit
+        )
+        drive.damping = 2 * m_eq * natural_frequency * damping_ratio * per_unit
     robot.joints = joints
 
 

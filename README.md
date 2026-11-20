@@ -175,7 +175,10 @@ any orientation representation) - the spawn pose in Isaac and viam's frame
 system then agree, so things like the motion service see components where
 they actually are. The `position` (meters) / `orientation_rpy_deg` attributes
 still work as a fallback when no frame is set; a camera `target` attribute
-overrides orientation to aim at a point.
+overrides orientation to aim at a point. Only a frame whose parent is `world`
+is a spawn pose: an arm or base framed under another component (a humanoid's
+torso under its lift) spawns at its `position` attribute (default the
+origin), since the module can't resolve the parent's pose.
 
 ### world attributes
 
@@ -311,13 +314,22 @@ URDF importer into a USD in its data directory (`VIAM_MODULE_DATA`), cached by
 the URDF's contents, and loads that. Mesh paths resolve relative to the URDF
 file. Links stay separate prims under `prim_path` (fixed joints are not
 merged), self-collision is off, and joints get position drives tuned like the
-importer's joint panel: `urdf_drive: {"natural_frequency": 100,
+importer's joint panel: `urdf_drive: {"natural_frequency": 750,
 "damping_ratio": 1.0}` by default (rad/s; stiffness = natural_frequency², or
 times the joint inertia for force drives; damping = 2 × natural_frequency ×
-damping_ratio, so 1.0 is critically damped). The importer's own default (25
-rad/s, damping from `<dynamics damping>`) lets a humanoid torso sag. URDF
+damping_ratio, so 1.0 is critically damped). The default gives every joint
+562500 per rad (or per m) stiffness and 1500 damping (acceleration drives);
+USD stores revolute gains per degree, 9817 and 26.2. On Mabel (humanoid) five
+arms track within 0.05° and the lift sags 0.3 mm. Earlier imports wrote the
+per-radian numbers into the per-degree USD attributes, so revolute joints were
+57× stiffer than `natural_frequency` said (the old default of 100 acted like
+757); the cache re-imports with the fixed units. The importer's own default (25 rad/s, damping
+from `<dynamics damping>`) lets a humanoid torso sag. URDF
 effort limits cap the drive force. The root floats unless `urdf_fix_base:
-true`; `fixed_base_link` pins any link instead. The first import of a large
+true`; `fixed_base_link` pins any link instead, at the arm's spawn pose: lift
+it by the depth of anything below that link's origin (wheels, feet) with
+`position`, or the floor pushes against the pin and the whole articulation
+jitters. The first import of a large
 robot can take minutes; it is cached, so later starts are fast. Editing meshes next to
 the URDF doesn't invalidate the cache: edit the URDF or delete the cached
 `urdf-*` directory. Set `max_joint_deg_s` on
@@ -348,10 +360,9 @@ articulation, so they don't move its base or reset the scene, and their
                    "L_arm_j5", "L_arm_j6", "L_arm_j7"]}}
 ```
 
-Multi-arm articulations are verified only in mock mode and against stand-ins
-for the Isaac API, not in a running Isaac Sim. Unverified: that partial
-`ArticulationAction`s from sibling arms on one articulation leave each other's
-joint targets alone. After every `world.reset()` (the world `reset` command, a
+Multi-arm articulations are verified in Isaac Sim 5.0 on a five-arm humanoid
+(URDF import): each arm's partial `ArticulationAction` changes only its own
+joint targets, and the other arms hold within 0.1°. After every `world.reset()` (the world `reset` command, a
 gripper attaching) each arm looks up its joint indices again, and a shared
 base's arm joints get their USD drive gains back.
 
