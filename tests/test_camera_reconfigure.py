@@ -159,3 +159,61 @@ def test_isaac_camera_configuration_applies_and_reads_back_state():
     assert camera.focal_length == pytest.approx(
         camera.aperture / (2.0 * math.tan(math.radians(60.0) / 2.0))
     )
+
+
+class _Float32ReadbackCamera(_FakeIsaacCamera):
+    """Reads back what Isaac Sim 5.0 returned for a head camera ~180 deg about
+    its X axis: Isaac stores the near-identity USD-axes rotation in float32,
+    which quantizes its tiny angle (here 1.13e-3 rad read back as 1.20e-3)."""
+
+    READBACK = (
+        1.6914550826641072e-07,
+        0.9999998211860663,
+        0.0004228639882057908,
+        -0.00042286387179046896,
+    )
+
+    def set_local_pose(self, translation=None, orientation=None, camera_axes="world"):
+        self.position = tuple(translation)
+
+    def get_local_pose(self, camera_axes="world"):
+        return self.position, self.READBACK
+
+
+@pytest.mark.parametrize("sign", [1.0, -1.0])
+def test_near_180_degree_camera_accepts_float32_readback(sign):
+    wanted = (1.599998719917927e-07, 0.9999998400001281, 0.0003999998720001037, -0.00039999974398828)
+    camera = _Float32ReadbackCamera()
+    camera.READBACK = tuple(sign * v for v in camera.READBACK)
+
+    _apply_camera_configuration(
+        camera,
+        {
+            "parent_prim": "/World/mabel/head",
+            "local_position": [0.0313, 0.018, -0.1057],
+            "local_orientation_wxyz": list(wanted),
+        },
+    )
+
+
+def test_camera_orientation_still_rejects_a_real_mismatch():
+    camera = _Float32ReadbackCamera()
+    half = math.radians(0.5) / 2  # wanted is READBACK turned 0.5 deg about Z
+    turn = (math.cos(half), 0.0, 0.0, math.sin(half))
+    w, x, y, z = camera.READBACK
+    a, _, _, d = turn
+    wanted = (a * w - d * z, a * x - d * y, a * y + d * x, a * z + d * w)
+
+    with pytest.raises(RuntimeError, match="orientation update did not apply"):
+        _apply_camera_configuration(
+            camera,
+            {"parent_prim": "/World/x", "local_orientation_wxyz": list(wanted)},
+        )
+
+
+def test_camera_orientation_rejects_nan_readback():
+    from isaac_module.sim_manager import _quaternions_close
+
+    nan = float("nan")
+    assert not _quaternions_close((nan, nan, nan, nan), (1.0, 0.0, 0.0, 0.0))
+    assert not _quaternions_close((1.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0))

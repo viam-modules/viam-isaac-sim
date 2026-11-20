@@ -214,3 +214,94 @@ def test_resume_cameras_off_sim_thread_resumes_and_waits_a_step(mock_sim):
     assert handle.paused is False
     assert cam.calls == ["pause", "resume"]
     assert mock_sim._loop_index > before
+
+
+class FakeHydraTexture:
+    def __init__(self):
+        self.updates = []
+
+    def set_updates_enabled(self, enabled):
+        self.updates.append(enabled)
+
+
+class FakeRenderedCam(FakeCam):
+    """Isaac's Camera.pause() only drops its Python data callback; the render
+    product keeps rendering unless its hydra texture is disabled."""
+
+    def __init__(self):
+        super().__init__()
+        self._render_product = type("RP", (), {})()
+        self._render_product.hydra_texture = FakeHydraTexture()
+
+
+def test_pause_stops_the_render_product_and_resume_restarts_it():
+    from isaac_module.sim_manager import IsaacCameraHandle
+
+    cam = FakeRenderedCam()
+    handle = IsaacCameraHandle(None, cam)
+    handle.pause()
+    handle.resume()
+    assert cam._render_product.hydra_texture.updates == [False, True]
+
+
+def test_status_reports_each_cameras_idle_state(mock_sim):
+    from isaac_module.sim_manager import IsaacCameraHandle
+
+    idle, busy = IsaacCameraHandle(mock_sim, FakeCam()), IsaacCameraHandle(mock_sim, FakeCam())
+    idle.pause()
+    mock_sim._handles["idle"] = ({}, idle)
+    mock_sim._handles["busy"] = ({}, busy)
+    try:
+        cams = mock_sim.status()["cameras"]
+    finally:
+        del mock_sim._handles["idle"], mock_sim._handles["busy"]
+    assert cams["idle"]["paused"] is True
+    assert cams["busy"]["paused"] is False
+    assert 0.0 <= cams["busy"]["last_read_s_ago"] < 5.0
+
+
+def test_read_after_resume_waits_three_rendered_steps(mock_sim):
+    # one step after re-enabling the render product still returns the
+    # pre-pause image on Isaac Sim 5.0
+    from isaac_module.sim_manager import IsaacCameraHandle
+
+    handle = IsaacCameraHandle(mock_sim, FakeCam())
+    handle.pause()
+
+    def task():
+        start = mock_sim._loop_index
+        return start, handle._read(lambda: mock_sim._loop_index)
+
+    start, fut = mock_sim.run(task)
+    # steps=n resolves in the flush of iteration start + n - 1
+    assert fut.result(timeout=5) - start == IsaacCameraHandle.RESUME_STEPS - 1
+    assert IsaacCameraHandle.RESUME_STEPS == 3
+
+
+def test_pause_without_render_product_still_pauses_and_warns_once(caplog):
+    from isaac_module.sim_manager import IsaacCameraHandle
+
+    cam = FakeCam()  # no _render_product: e.g. a different Isaac version
+    handle = IsaacCameraHandle(None, cam)
+    with caplog.at_level("WARNING"):
+        handle.pause()
+        handle.resume()
+        handle.pause()
+    assert cam.calls == ["pause", "resume", "pause"]
+    assert handle.paused is True
+    assert sum("render product" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_pause_marks_paused_even_if_disabling_rendering_fails():
+    from isaac_module.sim_manager import IsaacCameraHandle
+
+    cam = FakeRenderedCam()
+
+    def boom(enabled):
+        raise RuntimeError("hydra texture gone")
+
+    cam._render_product.hydra_texture.set_updates_enabled = boom
+    handle = IsaacCameraHandle(None, cam)
+    with pytest.raises(RuntimeError):
+        handle.pause()
+    assert handle.paused is True  # the idle tick won't retry it every step
