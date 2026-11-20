@@ -307,3 +307,90 @@ def test_visual_models_are_capped_per_link(monkeypatch):
     glb = stage_geometry.visual_glbs(chain, meshes=True)["l1"]
     mesh = trimesh.load(io.BytesIO(glb), file_type="glb", force="mesh")
     assert 0 < len(mesh.faces) <= 500
+
+
+def _torus(major=1.0, minor=0.3, n=200, m=100):
+    """A torus as a triangle soup: every triangle has its own 3 vertices, as an STL does."""
+    u, v = np.meshgrid(np.linspace(0, 2 * np.pi, n, endpoint=False), np.linspace(0, 2 * np.pi, m, endpoint=False))
+    points = np.stack(
+        [(major + minor * np.cos(v)) * np.cos(u), (major + minor * np.cos(v)) * np.sin(u), minor * np.sin(v)], -1
+    ).reshape(-1, 3)
+    i, j = np.meshgrid(np.arange(n), np.arange(m))
+    a, b, c, d = j * n + i, j * n + (i + 1) % n, ((j + 1) % m) * n + i, ((j + 1) % m) * n + (i + 1) % n
+    faces = np.concatenate([np.stack([a, b, d], -1).reshape(-1, 3), np.stack([a, d, c], -1).reshape(-1, 3)])
+    return points[faces].reshape(-1, 3), np.arange(len(faces) * 3).reshape(-1, 3)
+
+
+def _sphere(radius=1.0, n=200, m=100):
+    u, v = np.meshgrid(np.linspace(0, 2 * np.pi, n, endpoint=False), np.linspace(0, np.pi, m + 1))
+    points = radius * np.stack([np.sin(v) * np.cos(u), np.sin(v) * np.sin(u), np.cos(v)], -1).reshape(-1, 3)
+    i, j = np.meshgrid(np.arange(n), np.arange(m))
+    a, b, c, d = j * n + i, j * n + (i + 1) % n, (j + 1) * n + i, (j + 1) * n + (i + 1) % n
+    faces = np.concatenate([np.stack([a, b, d], -1).reshape(-1, 3), np.stack([a, d, c], -1).reshape(-1, 3)])
+    return points, faces
+
+
+def _clean(faces):
+    assert (faces[:, 0] != faces[:, 1]).all() and (faces[:, 1] != faces[:, 2]).all()
+    assert (faces[:, 0] != faces[:, 2]).all()
+    assert len(np.unique(np.sort(faces, axis=1), axis=0)) == len(faces)
+
+
+def test_simplified_clusters_a_dense_sphere_to_just_under_the_cap():
+    vertices, faces = stage_geometry.simplified(*_sphere(), cap=5000)
+    assert 3500 <= len(faces) <= 5000
+    _clean(faces)
+    assert np.abs(np.linalg.norm(vertices, axis=1) - 1).max() < 0.02
+
+
+def test_simplified_keeps_a_torus_hole_where_a_hull_would_fill_it():
+    vertices, faces = stage_geometry.simplified(*_torus(), cap=4000)
+    assert 2800 <= len(faces) <= 4000
+    _clean(faces)
+    ring = np.hypot(vertices[:, 0], vertices[:, 1])
+    tube = np.hypot(ring - 1.0, vertices[:, 2])
+    assert np.abs(tube - 0.3).max() < 0.02
+    assert ring.min() < 0.75  # the inner wall survives: a convex hull has none inside the ring
+
+
+def test_simplified_welds_a_soup_and_drops_degenerate_and_duplicate_faces():
+    vertices, faces = _torus(n=20, m=10)
+    faces = np.vstack([faces, [[0, 0, 1]], faces[:1, ::-1]])
+    welded, kept = stage_geometry.simplified(vertices, faces, cap=10_000)
+    assert len(welded) == 200  # each grid point once: shared normals shade smooth
+    assert len(kept) == 400
+    _clean(kept)
+
+
+def test_simplified_cap_is_a_ceiling_even_below_a_coarse_grid():
+    vertices, faces = stage_geometry.simplified(*_sphere(), cap=3)
+    assert len(faces) <= 3
+    _clean(faces)
+
+
+def test_visual_models_skip_a_link_with_no_triangles():
+    pytest.importorskip("trimesh")
+    chain = _chain()
+    chain["steps"][0]["visual"] = (np.zeros((3, 3)), np.array([[0, 0, 1]]))
+    assert stage_geometry.visual_glbs(chain, meshes=True) == {}
+
+
+def test_visual_models_without_quadric_decimation_are_clustered_not_hulled(monkeypatch):
+    trimesh = pytest.importorskip("trimesh")
+    import io
+
+    def unavailable(*_, **__):
+        raise ImportError("fast_simplification")
+
+    monkeypatch.setattr(trimesh.Trimesh, "simplify_quadric_decimation", unavailable)
+    monkeypatch.setattr(stage_geometry, "VISUAL_FACE_CAP", 4000)
+    chain = _chain()
+    vertices, faces = _torus(major=0.1, minor=0.03)
+    chain["steps"][0]["visual"] = (vertices, faces)
+    glb = stage_geometry.visual_glbs(chain, meshes=True)["l1"]
+    assert b'"NORMAL"' in glb  # smooth shaded
+    mesh = trimesh.load(io.BytesIO(glb), file_type="glb", force="mesh")
+    assert 2800 <= len(mesh.faces) <= 4000
+    centre = mesh.vertices.mean(axis=0)
+    ring = np.hypot(*(mesh.vertices - centre)[:, :2].T)
+    assert ring.min() < 0.075

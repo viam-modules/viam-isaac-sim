@@ -48,6 +48,12 @@ isaacsim-kernel = { index = "nvidia" }
 dev = [
     "ruff>=0.17.0",
 ]
+# not a default group: uv sync/run would install it beside Isaac Sim's own pxr
+test = [
+    "scipy",
+    "trimesh",
+    "usd-core",
+]
 
 [tool.ruff.lint]
 ignore = [
