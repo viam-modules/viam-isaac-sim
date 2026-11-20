@@ -290,6 +290,26 @@ def test_stop_after_arriving_keeps_the_reached_target():
     assert handle.is_moving() is False
 
 
+def test_stop_after_a_finished_trajectory_keeps_its_final_target():
+    sim = _FakeSim()
+    art = _FakeArt([0.0])
+    handle = IsaacArmHandle(sim, art, None, "/World/arm")
+    future = handle.start_trajectory(
+        (JointTrajectoryPoint(0.0, (0.0,)), JointTrajectoryPoint(0.1, (-0.5236,)))
+    )
+    callback = next(iter(sim.world.callbacks.values()))
+    for _ in range(5):
+        if future.done():
+            break
+        callback(0.05)
+    assert future.done()
+    art.positions = [-0.5038]  # jitter sample
+
+    handle.stop_trajectory()
+
+    assert art.actions[-1].joint_positions == pytest.approx([-0.5236])
+
+
 def test_stop_mid_move_still_holds_where_the_arm_is():
     sim = _FakeSim()
     art = _FakeArt([0.0])

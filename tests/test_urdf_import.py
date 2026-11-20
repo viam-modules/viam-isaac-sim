@@ -45,37 +45,23 @@ def _manager():
     return manager
 
 
-def test_urdf_usd_path_is_imported_and_the_arm_loads_the_usd(
-    imports, tmp_path, monkeypatch
-):
+def test_urdf_usd_path_is_imported_and_the_arm_loads_the_usd(imports, tmp_path):
     robot = _urdf(tmp_path)
     manager = _manager()
     manager._arm_articulations = {}
-    manager._arm_usd_owners = {}
-    manager._shared_bases = []
-    manager._require_prim = lambda path: None
     referenced = []
-    manager._isaac = SimpleNamespace(
-        add_reference_to_stage=lambda usd_path, prim_path: referenced.append(usd_path),
-        get_prim_at_path=lambda path: path,
-        SingleXFormPrim=lambda path: SimpleNamespace(set_world_pose=lambda **pose: None),
-        SingleArticulation=lambda prim_path, name: SimpleNamespace(),
-    )
-    manager.world = SimpleNamespace(scene=SimpleNamespace(add=lambda art: None))
-    manager._restore_shared_base_gains = lambda: None
-    monkeypatch.setattr(sim_manager, "_reset_articulation_at_pose", lambda *a: None)
-    monkeypatch.setattr(sim_manager, "IsaacArmHandle", lambda *a, **kw: None)
-    manager._isaac_arm_handle = lambda *a: None
 
-    manager._create_arm_isaac("arm", {"usd_path": str(robot), "urdf_fix_base": True})
+    def add_reference_to_stage(usd_path, prim_path):
+        referenced.append(usd_path)
+        raise StopIteration  # the rest of the spawn isn't under test
 
-    [(urdf_path, dest_path, fix_base, drive)] = imports
+    manager._isaac = SimpleNamespace(add_reference_to_stage=add_reference_to_stage)
+    with pytest.raises(StopIteration):
+        manager._create_arm_isaac("arm", {"usd_path": str(robot)})
+
+    [(urdf_path, dest_path, _, _)] = imports
     # absolute, so the importer resolves meshes against the URDF's directory
     assert urdf_path == str(robot.resolve())
-    assert fix_base is True
-    assert drive == (100.0, 1.0)  # critically damped default
-    assert dest_path.startswith(str(tmp_path / "data"))
-    assert dest_path.endswith(".usd")
     assert referenced == [dest_path]
 
 

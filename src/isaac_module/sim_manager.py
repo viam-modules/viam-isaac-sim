@@ -4591,7 +4591,7 @@ class IsaacArmHandle(ArmHandle):
             # new hold pose (the RDK calls Stop after every move).
             if (
                 self._target is not None
-                and self._trajectory_future is None
+                and (self._trajectory_future is None or self._trajectory_future.done())
                 and all(
                     abs(h - t) <= STOP_KEEPS_TARGET_WITHIN_RAD
                     for h, t in zip(held, self._target)
@@ -5860,7 +5860,7 @@ def _import_urdf(urdf: str, fix_base: bool, drive: tuple[float, float]) -> str:
     return its path. Cached by the URDF's bytes and the import config; edits
     to the meshes it references need a URDF change (or a cleared cache)."""
     src = Path(urdf).resolve()
-    config = f"|fix_base={fix_base}|drive={drive}|v{URDF_IMPORT_VERSION}"
+    config = f"|{src}|fix_base={fix_base}|drive={drive}|v{URDF_IMPORT_VERSION}"
     key = src.read_bytes() + config.encode()
     out = asset_cache_dir() / f"urdf-{src.stem}-{hashlib.sha1(key).hexdigest()[:12]}"
     usd = out / f"{src.stem}.usd"
@@ -5870,6 +5870,7 @@ def _import_urdf(urdf: str, fix_base: bool, drive: tuple[float, float]) -> str:
     # the importer reopens layers it finds, so start a retry from scratch
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
+    LOGGER.warning("importing %s; the sim pauses until it finishes", src)
     LOGGER.info("importing urdf %s -> %s", src, usd)
     started = time.monotonic()
     _run_urdf_importer(str(src), str(usd), fix_base, drive)

@@ -318,7 +318,9 @@ damping_ratio, so 1.0 is critically damped). The importer's own default (25
 rad/s, damping from `<dynamics damping>`) lets a humanoid torso sag. URDF
 effort limits cap the drive force. The root floats unless `urdf_fix_base:
 true`; `fixed_base_link` pins any link instead. The first import of a large
-robot can take minutes; it is cached, so later starts are fast. Set `max_joint_deg_s` on
+robot can take minutes; it is cached, so later starts are fast. Editing meshes next to
+the URDF doesn't invalidate the cache: edit the URDF or delete the cached
+`urdf-*` directory. Set `max_joint_deg_s` on
 URDF arms that carry other limbs (a humanoid torso): an unramped step saturates
 the drive and can slam the joint into its limit, where it may stay wedged; a
 ramp (e.g. 90) avoids it. A lower `natural_frequency` also avoids it but lets
