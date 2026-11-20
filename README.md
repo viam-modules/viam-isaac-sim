@@ -315,7 +315,11 @@ damping_ratio, so 1.0 is critically damped). The importer's own default (25
 rad/s, damping from `<dynamics damping>`) lets a humanoid torso sag. URDF
 effort limits cap the drive force. The root floats unless `urdf_fix_base:
 true`; `fixed_base_link` pins any link instead. The first import of a large
-robot can take minutes; it is cached, so later starts are fast.
+robot can take minutes; it is cached, so later starts are fast. Set `max_joint_deg_s` on
+URDF arms that carry other limbs (a humanoid torso): an unramped step saturates
+the drive and can slam the joint into its limit, where it may stay wedged; a
+ramp (e.g. 90) avoids it. A lower `natural_frequency` also avoids it but lets
+the joint sag under load, and a smaller `physics_dt` does not help.
 
 `joint_names` (optional, non-empty list of unique strings) names the
 articulation DOFs this arm drives, in order. It overrides a known asset's
