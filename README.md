@@ -823,7 +823,11 @@ default `[1, 0, 0]`) which way at full forward power. `max_thrust_n` (default
 `SetRPM` and the odometry: the thruster has no encoder, so `GetPosition`
 integrates the commanded rpm in simulator time, and `GoFor` / `GoTo` wait on
 that odometry (not the wall clock), so they stay correct when Isaac runs
-slower than real time and time out if it is paused. `SetPower` is the real control. Two
+slower than real time and time out if it is paused. The physics step that
+reaches a `GoFor` target cuts the thrust itself, so two thrusters commanded
+together (a `MoveStraight` on the base) stop on the same step instead of
+whenever each RPC handler next polls, which would yaw a light hull several
+degrees at the end of every straight run. `SetPower` is the real control. Two
 thrusters either side of the centerline steer by differential thrust, and
 `rdk:builtin:wheeled` drives them as a `base` for the app's control tab and
 the navigation service.
