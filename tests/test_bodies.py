@@ -407,6 +407,63 @@ def test_motor_go_for_integrates_revolutions_and_stops(boat):
         _run(boat.left.go_for(rpm=0, revolutions=1))
 
 
+def test_go_for_target_is_enforced_on_the_physics_step():
+    # the stop lands on the step that reaches the target, with the odometry
+    # clamped to it, not whenever an RPC handler next polls
+    state = ThrusterState("t", (0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
+    body = SimpleNamespace(_lock=threading.Lock())
+    from isaac_module.bodies import MotorHandle
+
+    handle = MotorHandle(body, state, max_thrust_n=10.0, reverse_thrust_n=5.0, max_rpm=600.0)
+    assert handle.go_for(rpm=600.0, revolutions=3.0) == pytest.approx(3.0)
+    assert state.force_n == 10.0 and state.rpm == 600.0
+    for _ in range(29):  # 10 rev/s: 29 steps of 0.01 s is 2.9 revolutions
+        state.tick(0.01)
+    assert state.force_n == 10.0 and handle.is_powered()
+    state.tick(0.01)
+    assert state.revolutions == pytest.approx(3.0)
+    assert state.force_n == 0.0 and state.rpm == 0.0 and not handle.is_powered()
+    assert state.target_revolutions is None
+    # a stopped thruster's odometry holds
+    state.tick(0.01)
+    assert state.revolutions == pytest.approx(3.0)
+    # reverse: negative rpm with positive revolutions runs backwards
+    handle.go_for(rpm=-600.0, revolutions=1.0)
+    assert state.force_n == -5.0
+    for _ in range(10):
+        state.tick(0.01)
+    assert state.revolutions == pytest.approx(2.0) and state.rpm == 0.0
+    # a new command drops the pending target
+    handle.go_for(rpm=600.0, revolutions=100.0)
+    handle.set_power(0.5)
+    assert state.target_revolutions is None and state.rpm == 300.0
+    # re-zeroing mid-run keeps the distance left to run
+    handle.go_for(rpm=600.0, revolutions=2.0)
+    handle.reset_revolutions(0.0)
+    assert state.target_revolutions == pytest.approx(2.0)
+    handle.update_limits(max_thrust_n=20.0, reverse_thrust_n=5.0, max_rpm=1200.0)
+    assert state.rpm == 1200.0 and state.force_n == 20.0
+    assert state.target_revolutions == pytest.approx(2.0)
+
+
+def test_paired_thrusters_commanded_together_stop_together(boat):
+    _park(boat)
+    _run(boat.left.reset_zero_position(0.0))
+    _run(boat.right.reset_zero_position(0.0))
+    left, right = boat.left._h(), boat.right._h()
+    left.go_for(3000.0, 25.0)
+    right.go_for(3000.0, 25.0)
+    deadline = time.monotonic() + 5.0
+    while (left.is_powered() or right.is_powered()) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not left.is_powered() and not right.is_powered()
+    assert left.revolutions() == pytest.approx(25.0) and right.revolutions() == pytest.approx(25.0)
+    readings = _run(boat.sensor.get_readings())
+    # both stopped on the same physics step, so the run stayed straight
+    assert readings["compass_heading"] == pytest.approx(90.0, abs=1.0)
+    assert readings["sim_position_m"]["x"] > 0.5
+
+
 def test_motor_reconfigure_keeps_live_limits_and_odometry(boat):
     before = boat.left._h()
     boat.left.reconfigure(

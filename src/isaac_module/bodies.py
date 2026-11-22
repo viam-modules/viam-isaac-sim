@@ -203,9 +203,24 @@ class ThrusterState:
     force_n: float = 0.0
     rpm: float = 0.0
     revolutions: float = 0.0
+    # odometry a GoFor runs to; None when the thruster runs until told to stop
+    target_revolutions: float | None = None
 
     def tick(self, dt: float) -> None:
+        """Integrate the odometry for one physics step. A GoFor target is
+        enforced here, on the physics thread, so two thrusters commanded
+        together cut out on the same step: stopping them from their own RPC
+        handlers lands tens of milliseconds apart, and one thruster pushing
+        alone for that long yaws a light hull by several degrees."""
+        if self.rpm == 0.0:
+            return
         self.revolutions += self.rpm * dt / 60.0
+        target = self.target_revolutions
+        if target is not None and (self.revolutions - target) * math.copysign(1.0, self.rpm) >= 0.0:
+            self.revolutions = target
+            self.rpm = 0.0
+            self.force_n = 0.0
+            self.target_revolutions = None
 
 
 @dataclass(frozen=True)
@@ -504,34 +519,52 @@ class MotorHandle:
         self.max_thrust_n = max_thrust_n
         self.reverse_thrust_n = reverse_thrust_n
         self.max_rpm = max_rpm
-        self._power = 0.0
 
     def update_limits(self, max_thrust_n: float, reverse_thrust_n: float, max_rpm: float) -> None:
+        with self.body._lock:
+            power = self._state.rpm / self.max_rpm
+            target = self._state.target_revolutions
         self.max_thrust_n = max_thrust_n
         self.reverse_thrust_n = reverse_thrust_n
         self.max_rpm = max_rpm
-        self.set_power(self._power)
+        self.set_power(power)
+        with self.body._lock:
+            self._state.target_revolutions = target
 
     def set_power(self, power: float) -> None:
+        """Run at a fraction of full thrust until told otherwise; a pending
+        GoFor target is dropped, the new command owns the thruster."""
         power = float(power)
         if not math.isfinite(power):
             raise ValueError("power must be finite")
         power = max(-1.0, min(1.0, power))
         thrust = self.max_thrust_n if power >= 0.0 else self.reverse_thrust_n
         with self.body._lock:
-            self._power = power
             self._state.force_n = power * thrust
             self._state.rpm = power * self.max_rpm
+            self._state.target_revolutions = None
 
     def set_rpm(self, rpm: float) -> None:
         self.set_power(rpm / self.max_rpm)
+
+    def go_for(self, rpm: float, revolutions: float) -> float:
+        """Run at rpm until the odometry has advanced by revolutions (the
+        signs combine as in the motor API), then stop on the physics step
+        that reaches it. Returns the odometry the thruster will stop at."""
+        direction = 1.0 if (rpm > 0.0) == (revolutions > 0.0) else -1.0
+        speed = min(abs(rpm), self.max_rpm)
+        self.set_power(direction * speed / self.max_rpm)
+        with self.body._lock:
+            target = self._state.revolutions + direction * abs(revolutions)
+            self._state.target_revolutions = target
+        return target
 
     def stop(self) -> None:
         self.set_power(0.0)
 
     def power(self) -> float:
         with self.body._lock:
-            return self._power
+            return self._state.rpm / self.max_rpm
 
     def is_powered(self) -> bool:
         return self.power() != 0.0
@@ -542,7 +575,11 @@ class MotorHandle:
 
     def reset_revolutions(self, offset: float) -> None:
         with self.body._lock:
+            shift = -float(offset) - self._state.revolutions
             self._state.revolutions = -float(offset)
+            if self._state.target_revolutions is not None:
+                # a GoFor in flight keeps the same distance left to run
+                self._state.target_revolutions += shift
 
     def detach(self) -> None:
         self.body.unregister_thruster(self._state.name)
