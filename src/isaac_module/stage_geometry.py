@@ -21,7 +21,7 @@ from viam.logging import getLogger
 
 LOGGER = getLogger(__name__)
 UNLIMITED_RAD = 2 * math.pi  # a revolute joint with no USD limits plans over -360..360 degrees
-VISUAL_FACE_CAP = 20_000  # per link GLB: full-res Mabel arm links are ~2 MB each
+VISUAL_FACE_CAP = 10_000  # per link GLB, ~470 KB: a 7-link Mabel arm ~3.3 MB
 
 
 def ply(pieces: Sequence[tuple[np.ndarray, np.ndarray]]) -> bytes:
@@ -167,31 +167,82 @@ def build_urdf(chain: dict, meshes: bool) -> tuple[bytes, dict[str, tuple[str, b
 def visual_glbs(chain: dict, meshes: bool) -> dict[str, bytes]:
     """A GLB of each link's visual prims, keyed by link name, in the frame of
     the link's collision (where a viewer draws a link's 3D model); a link with
-    no collision gets none. Untextured, grey. A link over VISUAL_FACE_CAP
-    triangles is decimated to it (needs fast_simplification), else served as
-    the convex hull of a sample of its points. Needs trimesh (ImportError without it)."""
+    no collision, or no triangles, gets none. Untextured, grey, welded so it
+    shades smooth (split at sharp edges). A link over VISUAL_FACE_CAP triangles
+    is decimated to it: quadric decimation with fast_simplification, else
+    vertex clustering, never a hull. Needs trimesh (ImportError without it)."""
     import trimesh
 
     models = {}
     for name, _, _, visual in _links(_renamed(chain), meshes):
         if visual is None:
             continue
-        mesh = trimesh.Trimesh(*visual, process=False)
-        if len(mesh.faces) > VISUAL_FACE_CAP:
+        vertices, faces = welded(*visual)
+        if len(faces) > VISUAL_FACE_CAP:
             try:
+                mesh = trimesh.Trimesh(vertices, faces, process=False)
                 mesh = mesh.simplify_quadric_decimation(face_count=VISUAL_FACE_CAP)
-                how = "decimated"
-            except Exception:  # no fast_simplification: a convex hull, coarse but closed
-                # a hull has ~2 faces per vertex: sample the points down to fit the cap
-                points = mesh.vertices[:: math.ceil(len(mesh.vertices) / (VISUAL_FACE_CAP // 2))]
-                mesh = trimesh.Trimesh(*hull(points), process=False)
-                how = "convex hull"
+                vertices, faces, how = mesh.vertices, mesh.faces, "quadric decimation"
+            except Exception as exc:  # ImportError: no fast_simplification, the usual case
+                if not isinstance(exc, ImportError):
+                    LOGGER.debug("%s: quadric decimation of %s failed: %r", chain["name"], name, exc)
+                vertices, faces = _clustered_under(vertices, faces, VISUAL_FACE_CAP)
+                how = "vertex clustering"
             LOGGER.info(
                 "%s: visual model of %s capped at %d triangles (%s, %d)",
-                chain["name"], name, VISUAL_FACE_CAP, how, len(mesh.faces),
+                chain["name"], name, VISUAL_FACE_CAP, how, len(faces),
             )
-        models[name] = mesh.export(file_type="glb")
+        if not len(faces):
+            continue
+        mesh = trimesh.Trimesh(vertices, faces, process=False).smooth_shaded
+        models[name] = mesh.export(file_type="glb", include_normals=True)
     return models
+
+
+def welded(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """A mesh with duplicate vertices merged (so its triangles share normals)
+    and no degenerate or repeated triangles. Numpy only."""
+    vertices, faces = np.asarray(vertices, float), np.asarray(faces, int).reshape(-1, 3)
+    if not len(faces):
+        return vertices, faces
+    return _clustered(vertices, faces, (float(np.ptp(vertices, axis=0).max()) or 1.0) * 1e-9)
+
+
+def simplified(vertices: np.ndarray, faces: np.ndarray, cap: int) -> tuple[np.ndarray, np.ndarray]:
+    """A mesh welded, then if over cap triangles vertex clustered to at most cap."""
+    vertices, faces = welded(vertices, faces)
+    return (vertices, faces) if len(faces) <= cap else _clustered_under(vertices, faces, cap)
+
+
+def _clustered_under(vertices: np.ndarray, faces: np.ndarray, cap: int) -> tuple[np.ndarray, np.ndarray]:
+    """A welded mesh snapped to the finest grid that leaves at most cap
+    triangles (a ceiling: a cell twice the mesh's span leaves none), each
+    cell's vertices merged at their mean."""
+    span = float(np.ptp(vertices, axis=0).max()) or 1.0
+    lo, hi = span * 1e-9, 2 * span
+    best = _clustered(vertices, faces, hi)
+    while hi / lo > 1.01:  # bisect the cell size (in log): finer cells keep more triangles
+        cell = math.sqrt(lo * hi)
+        trial = _clustered(vertices, faces, cell)
+        if len(trial[1]) <= cap:
+            hi, best = cell, trial
+        else:
+            lo = cell
+    return best
+
+
+def _clustered(vertices: np.ndarray, faces: np.ndarray, cell: float) -> tuple[np.ndarray, np.ndarray]:
+    keys = np.floor((vertices - vertices.min(axis=0)) / cell).astype(np.int64)
+    _, inverse = np.unique(keys, axis=0, return_inverse=True)
+    inverse = inverse.reshape(-1)
+    faces = inverse[faces]
+    faces = faces[(faces[:, 0] != faces[:, 1]) & (faces[:, 1] != faces[:, 2]) & (faces[:, 0] != faces[:, 2])]
+    _, first = np.unique(np.sort(faces, axis=1), axis=0, return_index=True)
+    faces = faces[np.sort(first)]
+    used, faces = np.unique(faces, return_inverse=True)  # drop cells no triangle uses
+    counts = np.bincount(inverse)[used]
+    merged = np.column_stack([np.bincount(inverse, vertices[:, k])[used] for k in range(3)])
+    return merged / counts[:, None], faces.reshape(-1, 3)
 
 
 # ----------------------------------------------------------------------------
