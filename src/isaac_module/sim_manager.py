@@ -3240,7 +3240,7 @@ class SimManager:
             raise ValueError(
                 f"gripper {name!r}: joints {missing} not found in articulation DOFs: {names}"
             )
-        return IsaacGripperHandle(
+        handle = IsaacGripperHandle(
             self,
             arm._art,
             meta["drive_joint"],
@@ -3253,6 +3253,8 @@ class SimManager:
             drive_stiffness=meta["drive_stiffness"],
             drive_damping=meta["drive_damping"],
         )
+        handle._stage_arm = arm
+        return handle
 
     def _create_integrated_gripper_isaac(
         self,
@@ -4410,6 +4412,13 @@ class ArmHandle:
         """Return positions, velocities, target, and EE pose on the sim thread."""
         raise NotImplementedError
 
+    def stage_chain(self, name: str, visual: bool) -> dict[str, Any]:
+        """The arm's chain read from the stage, for stage_geometry.build_urdf."""
+        raise NotImplementedError(
+            f"no kinematics file known for arm {name}; set the "
+            '"kinematics_url" attribute (SVA .json or .urdf)'
+        )
+
 
 class IsaacArmHandle(ArmHandle):
     def __init__(
@@ -4840,6 +4849,23 @@ class IsaacArmHandle(ArmHandle):
             )
         return _pose_floats(self._ee.get_world_pose())
 
+    def stage_chain(self, name: str, visual: bool) -> dict[str, Any]:
+        if self._base_prim is None or self._ee is None:
+            # a known asset or a lone custom USD: its base is the spawn pose, not a link
+            return super().stage_chain(name, visual)
+        from .stage_geometry import stage_chain
+
+        return self._sim.run(
+            lambda: stage_chain(
+                self._sim._isaac.get_prim_at_path(self._prim_path),
+                name,
+                self.joint_names(),
+                str(self._base_prim.prim_path),
+                str(self._ee.prim_path),
+                visual,
+            )
+        )
+
     def capture_state(self):
         positions = [
             float(v)
@@ -5106,6 +5132,15 @@ class GripperHandle:
     def capture_state(self) -> tuple[float, float]:
         """Return policy command and observation state in the gripper's mode."""
         raise NotImplementedError
+
+    def collision_pieces(
+        self, position: Sequence[float], quat_wxyz: Sequence[float]
+    ) -> list[tuple[str, Any, Any]]:
+        """(link name, vertices m, faces) of a joint-name gripper's links (those
+        below its arm's end effector link) as they are now, in the gripper's
+        Viam frame: `position` and `quat_wxyz` from the end effector. Empty for
+        other grippers."""
+        return []
 
 
 class IsaacGripperHandle(GripperHandle):
@@ -5401,6 +5436,45 @@ class IsaacGripperHandle(GripperHandle):
             return gap > self._holding_tolerance and self._held_latch
 
         return self._sim.run(check)
+
+    _stage_arm: Any = None  # a joint-name gripper's arm
+    _stage_links: list | None = None
+
+    def collision_pieces(self, position, quat_wxyz):
+        arm = self._stage_arm
+        if arm is None or arm._ee is None:
+            return []
+        import numpy as np
+
+        from .stage_geometry import hand_links, matrix_from_pose, moved, planning_pieces
+
+        def _read():
+            from pxr import UsdGeom
+
+            isaac = self._sim._isaac
+            root = isaac.get_prim_at_path(arm._prim_path)
+            meters = UsdGeom.GetStageMetersPerUnit(root.GetStage())
+            if self._stage_links is None:  # each link's collision triangles, in its own frame
+                stage = root.GetStage()
+                self._stage_links = [
+                    (path.rsplit("/", 1)[-1], isaac.SingleXFormPrim(path), piece)
+                    for path in hand_links(root, str(arm._ee.prim_path))
+                    if (piece := planning_pieces(stage.GetPrimAtPath(path)))
+                ]
+            # stage units throughout, meters out: the frame offset is meters
+            frame = matrix_from_pose(*_pose_floats(arm._ee.get_world_pose()))
+            offset = matrix_from_pose([v / meters for v in position], quat_wxyz)
+            to_frame = np.linalg.inv(frame @ offset)
+            return [
+                (
+                    name,
+                    moved(to_frame @ matrix_from_pose(*_pose_floats(prim.get_world_pose())), vertices) * meters,
+                    faces,
+                )
+                for name, prim, (vertices, faces) in self._stage_links
+            ]
+
+        return self._sim.run(_read)
 
     def capture_state(self) -> tuple[float, float]:
         measured = float(self._art.get_joint_positions(joint_indices=[self._index])[0])
