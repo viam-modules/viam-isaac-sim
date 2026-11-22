@@ -890,9 +890,19 @@ def _values_close(actual: Sequence[float], expected: Sequence[float]) -> bool:
 
 
 def _quaternions_close(actual: Sequence[float], expected: Sequence[float]) -> bool:
-    return _values_close(actual, expected) or _values_close(
-        actual, tuple(-float(value) for value in expected)
+    """Same rotation within 1e-3 rad, q and -q alike. Isaac keeps camera
+    rotations in float32 in USD camera axes, where a frame near 180 deg in
+    Viam/ROS axes is near identity; float32 quantizes such a tiny angle by up
+    to ~7e-4 rad, so per-component checks reject poses that did apply."""
+    if len(actual) != 4 or len(expected) != 4:
+        return False
+    dot = sum(float(a) * float(e) for a, e in zip(actual, expected))
+    norms = math.sqrt(sum(float(a) ** 2 for a in actual)) * math.sqrt(
+        sum(float(e) ** 2 for e in expected)
     )
+    if not (math.isfinite(dot) and math.isfinite(norms)) or norms == 0.0:
+        return False
+    return 2.0 * math.acos(min(1.0, abs(dot) / norms)) <= 1e-3
 
 
 def _apply_camera_configuration(camera: Any, attrs: dict[str, Any]) -> None:
@@ -960,6 +970,7 @@ def _apply_camera_configuration(camera: Any, attrs: dict[str, Any]) -> None:
     ):
         raise RuntimeError(
             f"camera orientation update did not apply: {tuple(actual_orientation)!r}"
+            f" (wanted {tuple(expected_orientation)!r})"
         )
 
     near_clip_m = float(attrs.get("near_clip_m", 0.01))
@@ -2481,6 +2492,16 @@ class SimManager:
         if self._booted.is_set() and not self.mock:
             out["playing"] = self.is_playing()
             out["sim_time"] = self.sim_time_s()
+        now = time.monotonic()
+        out["cameras"] = {
+            name: {
+                "paused": handle.paused,
+                "last_read_s_ago": round(now - handle.last_read, 1),
+            }
+            # list(): viam threads add handles while this runs
+            for name, (_, handle) in list(self._handles.items())
+            if isinstance(handle, IsaacCameraHandle)
+        }
         return out
 
     def _prop_spec(self, name: str) -> tuple[str, dict[str, Any]]:
@@ -5535,14 +5556,35 @@ class IsaacCameraHandle(CameraHandle):
         self.last_read = time.monotonic()
         self.paused = False
         self.fresh_from = 0  # first _loop_index at which a read is fresh
+        self._warned_no_texture = False
+
+    def _set_rendering(self, enabled: bool) -> None:
+        # Isaac's Camera.pause() only drops its Python data callback; the
+        # render product keeps rendering every step unless its hydra texture
+        # is switched off (Isaac Sim 5.0, the Replicator-documented switch).
+        # ponytail: reaches into Camera._render_product; no public accessor.
+        product = getattr(self._cam, "_render_product", None)
+        texture = getattr(product, "hydra_texture", None)
+        if texture is None:
+            if not self._warned_no_texture:
+                self._warned_no_texture = True
+                LOGGER.warning(
+                    "camera %s has no render product to switch off; pausing it "
+                    "won't save its render cost",
+                    getattr(self._cam, "prim_path", "?"),
+                )
+            return
+        texture.set_updates_enabled(enabled)
 
     def pause(self) -> None:
-        # Measured on Isaac Sim 5.0: pausing an unread camera recovers its
-        # render cost (about 9% step time for 1280x720).
-        self._cam.pause()
+        # paused first: if switching rendering off raises, the idle tick
+        # must not retry (and log) every step
         self.paused = True
+        self._cam.pause()
+        self._set_rendering(False)
 
     def resume(self) -> None:
+        self._set_rendering(True)
         self._cam.resume()
         self.paused = False
         # a fresh resume counts as a read, or the next tick re-pauses it
@@ -5551,10 +5593,11 @@ class IsaacCameraHandle(CameraHandle):
     def reconfigure(self, attrs: dict[str, Any]) -> None:
         _apply_camera_configuration(self._cam, attrs)
 
-    # Steps to wait after resume before reading. With async rendering (the
-    # default; capture_after_render false), annotators can lag a frame, so one
-    # step may still return the pre-pause image. Verified on Isaac Sim 5.0: one step after resume returns a fresh frame.
-    RESUME_STEPS = 1
+    # Steps to wait after resume before reading. With the render product
+    # switched off while paused, its annotators still hold the pre-pause
+    # image after one step (Isaac Sim 5.0: a 0.5 m base move was invisible
+    # in the first read after resume), so wait out the frames in flight.
+    RESUME_STEPS = 3
 
     def _read(self, capture: Callable[[], Any]):
         """On the sim thread: read now, or resume and read after the next
