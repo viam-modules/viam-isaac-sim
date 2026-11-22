@@ -79,3 +79,99 @@ def test_spawn_gives_the_handle_the_frame_pose_without_the_usd_yaw_offset(
     )
     assert handle_kwargs["base_position"] == pytest.approx((1.5, 0.0, 0.0))
     assert handle_kwargs["base_orientation"] == pytest.approx(list(frame))
+
+
+def test_custom_arm_reports_relative_to_its_first_joints_parent_link():
+    # a humanoid's arm sharing one articulation: its kinematics base is the
+    # link its first joint hangs off (which moves with the torso), not world
+    yaw = quat_from_euler_deg(0.0, 0.0, 90.0)
+    handle = _handle((1.0, 0.5, 0.2), yaw)
+    handle._base_prim = SimpleNamespace(get_world_pose=lambda: ((1.0, 0.0, 0.0), yaw))
+    runs = []
+    handle._sim = SimpleNamespace(run=lambda fn, timeout=None: runs.append(fn) or fn())
+    position, rotation = handle.get_end_pose_in_base()
+    assert len(runs) == 1  # end and base read in the same physics step
+    assert position == pytest.approx((0.5, 0.0, 0.2), abs=1e-9)
+    assert rotation == pytest.approx(IDENTITY, abs=1e-9)
+
+
+def _prim(name, children=(), body0=None):
+    rel = SimpleNamespace(GetTargets=lambda: [body0] if body0 else [])
+    return SimpleNamespace(
+        GetName=lambda: name,
+        GetChildren=lambda: list(children),
+        GetRelationship=lambda rel_name: rel if rel_name == "physics:body0" else None,
+    )
+
+
+def test_custom_arm_spawn_finds_the_first_joints_parent_link():
+    root = _prim(
+        "robot",
+        [
+            _prim("torso"),
+            _prim("joints", [_prim("arm_1", body0="/World/robot/torso")]),
+        ],
+    )
+    assert sim_manager._joint_parent_link(root, "arm_1") == "/World/robot/torso"
+    assert sim_manager._joint_parent_link(root, "missing") is None
+
+
+def _wiring_manager(root):
+    manager = object.__new__(SimManager)
+    manager._isaac = SimpleNamespace(
+        get_prim_at_path=lambda path: root,
+        SingleXFormPrim=lambda path: SimpleNamespace(prim_path=path),
+    )
+    return manager
+
+
+def _wired_base(meta=None, link_base=True, root=None):
+    root = root or _prim("robot", [_prim("arm_1", body0="/World/robot/torso")])
+    art = SimpleNamespace(dof_names=["arm_1", "arm_2"])
+    handle = _wiring_manager(root)._isaac_arm_handle(
+        "arm", {"joint_names": ["arm_1", "arm_2"]}, meta or {}, art, "/World/robot",
+        link_base=link_base,
+    )
+    return handle._base_prim
+
+
+def test_urdf_or_shared_arm_uses_its_first_joints_parent_link():
+    assert _wired_base().prim_path == "/World/robot/torso"
+
+
+def test_known_asset_keeps_the_spawn_pose_base():
+    assert _wired_base(meta={"joint_names": ["arm_1", "arm_2"]}) is None
+
+
+def test_single_custom_usd_arm_keeps_the_spawn_pose_base():
+    assert _wired_base(link_base=False) is None
+
+
+def test_no_parent_link_found_falls_back_to_the_spawn_pose():
+    assert _wired_base(root=_prim("robot", [_prim("other")])) is None
+
+
+def test_create_arm_wires_link_base_for_urdf_and_shared_arms(monkeypatch):
+    calls = {}
+    manager = object.__new__(SimManager)
+    manager._arm_articulations = {}
+    manager._arm_usd_owners = {}
+    manager._shared_bases = []
+    manager._require_prim = lambda path: None
+    manager._isaac = SimpleNamespace(
+        add_reference_to_stage=lambda usd_path, prim_path: None,
+        get_prim_at_path=lambda path: SimpleNamespace(),
+        SingleXFormPrim=lambda path: SimpleNamespace(set_world_pose=lambda **_: None),
+        SingleArticulation=lambda prim_path, name: SimpleNamespace(),
+    )
+    manager.world = SimpleNamespace(scene=SimpleNamespace(add=lambda art: None))
+    manager._restore_shared_base_gains = lambda: None
+    monkeypatch.setattr(sim_manager, "_reset_articulation_at_pose", lambda *a: None)
+    manager._isaac_arm_handle = lambda name, attrs, meta, art, path, link_base=False: (
+        calls.setdefault(name, link_base)
+    )
+    manager._resolve_usd = lambda a: (a.get("usd_path") and "/cache/x.usd", {})
+    manager._create_arm_isaac("single", {"usd_path": "/r/arm.usd", "prim_path": "/World/a"})
+    manager._create_arm_isaac("urdf", {"usd_path": "/r/bot.URDF", "prim_path": "/World/b"})
+    manager._create_arm_isaac("sibling", {"prim_path": "/World/b"})
+    assert calls == {"single": False, "urdf": True, "sibling": True}

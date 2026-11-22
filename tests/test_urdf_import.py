@@ -127,7 +127,7 @@ def test_urdf_drive_is_passed_to_the_importer_and_keys_the_cache(imports, tmp_pa
         {"usd_path": str(robot), "urdf_drive": {"natural_frequency": 25, "damping_ratio": 0.5}}
     )
     assert soft != default
-    assert [call[3] for call in imports] == [(100.0, 1.0), (25.0, 0.5)]
+    assert [call[3] for call in imports] == [(750.0, 1.0), (25.0, 0.5)]
 
 
 @pytest.mark.parametrize(
@@ -150,32 +150,53 @@ def test_bad_urdf_drive_is_rejected(imports, tmp_path, drive):
 def test_drive_gains_follow_the_importers_natural_frequency_math():
     """Same as the importer UI: stiffness from compute_natural_stiffness,
     damping = 2 * m_eq * natural_frequency * damping_ratio, where m_eq is 1
-    for acceleration drives and the joint inertia for force drives."""
+    for acceleration drives and the joint inertia for force drives. The
+    importer writes gains as USD values, which are per degree for revolute
+    joints, so those are converted from per radian; prismatic stay SI."""
+    import math
+
     position, force_type = "position", "force"
+    revolute, continuous, prismatic = "revolute", "continuous", "prismatic"
     urdf = SimpleNamespace(
         UrdfJointTargetType=SimpleNamespace(JOINT_DRIVE_POSITION=position),
         UrdfJointDriveType=SimpleNamespace(JOINT_DRIVE_FORCE=force_type),
+        UrdfJointType=SimpleNamespace(
+            JOINT_REVOLUTE=revolute,
+            JOINT_CONTINUOUS=continuous,
+            JOINT_PRISMATIC=prismatic,
+        ),
     )
 
-    def joint(target_type, drive_type, inertia):
+    def joint(target_type, drive_type, inertia, kind=revolute):
         drive = SimpleNamespace(target_type=target_type, drive_type=drive_type)
-        return SimpleNamespace(drive=drive, inertia=inertia)
+        return SimpleNamespace(drive=drive, inertia=inertia, type=kind)
 
     joints = {
         "torso": joint(position, "acceleration", 7.0),
-        "wheel": joint(position, force_type, 0.5),
+        "wheel": joint(position, force_type, 0.5, continuous),
+        "lift": joint(position, "acceleration", 3.0, prismatic),
         "free": joint("none", "acceleration", 1.0),
     }
     robot = SimpleNamespace()
     robot.joints = joints
     interface = SimpleNamespace(
-        compute_natural_stiffness=lambda r, name, nf: {"torso": 1, "wheel": 2}[name] * nf * nf
+        compute_natural_stiffness=lambda r, name, nf: {"torso": 1, "wheel": 2, "lift": 1}[name]
+        * nf
+        * nf
     )
     sim_manager._set_urdf_drives(urdf, interface, robot, 100.0, 1.0)
 
-    torso, wheel, free = (robot.joints[n].drive for n in ("torso", "wheel", "free"))
-    assert (torso.strength, torso.damping) == (10000.0, 200.0)
-    assert (wheel.strength, wheel.damping) == (20000.0, 100.0)
+    torso, wheel, lift, free = (
+        robot.joints[n].drive for n in ("torso", "wheel", "lift", "free")
+    )
+    per_degree = math.pi / 180
+    assert (torso.strength, torso.damping) == pytest.approx(
+        (10000.0 * per_degree, 200.0 * per_degree)
+    )
+    assert (wheel.strength, wheel.damping) == pytest.approx(
+        (20000.0 * per_degree, 100.0 * per_degree)
+    )
+    assert (lift.strength, lift.damping) == (10000.0, 200.0)
     assert (torso.natural_frequency, torso.damping_ratio) == (100.0, 1.0)
     assert not hasattr(free, "strength")
 
