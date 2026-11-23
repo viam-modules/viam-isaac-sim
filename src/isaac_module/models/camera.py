@@ -45,6 +45,7 @@ import asyncio
 from io import BytesIO
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from google.protobuf.timestamp_pb2 import Timestamp
 from typing_extensions import Self
 from viam.components.camera import Camera
 from viam.media.video import CameraMimeType, NamedImage, ViamImage
@@ -199,7 +200,11 @@ class IsaacCamera(Camera, EasyResource):
         self, *, filter_source_names: Optional[Sequence[str]] = None, **kwargs
     ) -> Tuple[List[NamedImage], ResponseMetadata]:
         images = await asyncio.to_thread(self._named_images, filter_source_names)
-        return images, ResponseMetadata()
+        # rdk's collector stores captured_at as time_received, so an unset value lands as the
+        # epoch; stamped after the read because the render precedes the request.
+        captured_at = Timestamp()
+        captured_at.GetCurrentTime()
+        return images, ResponseMetadata(captured_at=captured_at)
 
     def _point_cloud(self) -> bytes:
         handle = self._h()
