@@ -361,6 +361,36 @@ def test_arm_set_joint_targets_radians_is_immediate_and_validated(world):
     asyncio.run(scenario())
 
 
+def test_arm_set_joint_positions_radians_teleports_and_holds(world):
+    arm = IsaacArm.new(
+        _config("teleport-arm", {"world": "sim-world", "asset": "ur20", "mock_dof": 6}),
+        {},
+    )
+
+    async def scenario():
+        pose = [0.4, -0.2, 0.3, -0.1, 0.2, -0.3]
+        result = await arm.do_command(
+            {"command": "set_joint_positions_radians", "values": pose}
+        )
+        assert result == {"accepted": True}
+        # there at once, not driven there at the mock's 1 rad/s
+        assert arm._h().get_joint_positions() == pytest.approx(pose)
+        await asyncio.sleep(0.05)  # a few ticks later it still holds
+        reported = await arm.do_command({"command": "get_joint_positions_radians"})
+        assert reported["values"] == pytest.approx(pose)
+        assert not arm._h().is_moving()
+        with pytest.raises(ValueError, match="requires 6 values"):
+            await arm.do_command(
+                {"command": "set_joint_positions_radians", "values": [0.0]}
+            )
+        with pytest.raises(ValueError, match="must be finite"):
+            await arm.do_command(
+                {"command": "set_joint_positions_radians", "values": [math.nan] * 6}
+            )
+
+    asyncio.run(scenario())
+
+
 def test_mock_arms_share_a_prim_with_joint_subsets(world):
     from viam.components.arm import JointPositions
 

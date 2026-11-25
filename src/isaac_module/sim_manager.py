@@ -1060,6 +1060,8 @@ class SimManager:
 
     def __init__(self) -> None:
         self._tasks: queue.Queue[tuple[Callable[[], Any], Future]] = queue.Queue()
+        # set when a task is queued, so a paused loop can wake for it
+        self._task_ready = threading.Event()
         self._boot_requested = threading.Event()
         self._booted = threading.Event()
         self._boot_error: BaseException | None = None
@@ -1079,6 +1081,9 @@ class SimManager:
         self._after_step: list[list[Any]] = []
         self._loop_index = 0  # main_loop iterations started
         self._mock_sim_time_s = 0.0
+        self._mock_playing = True
+        # a `step` while paused: [ticks_left, ticks, future]
+        self._step_request: list[Any] | None = None
         self._stats = StepStats()
         # component name -> (spawn attrs, handle). viam-server rebuilds
         # resources on config change, but prims can't be re-spawned without
@@ -1216,14 +1221,20 @@ class SimManager:
             loop_start = time.perf_counter()
             self._loop_index += 1
             self._drain_tasks()
+            # this iteration is one tick of a `step` while paused
+            stepping = self._step_request is not None
             now = time.monotonic()
             dt = now - last
             last = now
+            if self.mock and stepping:
+                dt = self.cfg.resolved_rendering_dt()
+            elif self.mock and not self._mock_playing:
+                dt = 0.0
             for cb in list(self._step_callbacks.values()):
                 cb(dt)
             if self.mock:
                 # The mock integrates with wall-clock dt, so its sim clock is
-                # wall time elapsed since boot.
+                # wall time elapsed while playing.
                 self._mock_sim_time_s += dt
                 time.sleep(0.01)
                 self._flush_after_step()
@@ -1233,7 +1244,10 @@ class SimManager:
                 # substeps; physics callbacks fire once per substep.
                 sim_before = self.world.current_time
                 step_start = time.perf_counter()
-                self.world.step(render=True)
+                if stepping:
+                    self._step_paused_world()
+                else:
+                    self.world.step(render=True)
                 step_s = time.perf_counter() - step_start
                 # defensive clamp: a time rewind must never show up as negative sim time
                 sim_dt = max(0.0, self.world.current_time - sim_before)
@@ -1246,9 +1260,24 @@ class SimManager:
                 self._pause_idle_cameras()
                 if self._capture_after_render_active:
                     self._capture_after_render()
-                if pacer is not None:
-                    pacer.after_step(step_dt)
+                if pacer is not None and not stepping:
+                    if self.world.is_playing():
+                        pacer.after_step(step_dt)
+                    else:
+                        # paused, sim time holds: no clock to keep, so serve
+                        # commands as they arrive instead of sleeping out the
+                        # period, without a render each (a lockstep replay
+                        # waits on every one); a step starts its tick now
+                        deadline = loop_start + step_dt
+                        while (
+                            self._step_request is None
+                            and (left := deadline - time.perf_counter()) > 0
+                            and self._task_ready.wait(left)
+                        ):
+                            self._drain_tasks()
             self._stats.record(step_s, time.perf_counter() - loop_start, sim_dt)
+            if stepping:
+                self._finish_step_tick()
 
         if self._episode_id is not None:
             try:
@@ -1263,6 +1292,7 @@ class SimManager:
                 LOGGER.exception("error closing isaac sim")
 
     def _drain_tasks(self) -> None:
+        self._task_ready.clear()
         while True:
             try:
                 fn, fut = self._tasks.get_nowait()
@@ -1273,6 +1303,100 @@ class SimManager:
                     fut.set_result(fn())
                 except BaseException as e:
                     fut.set_exception(e)
+
+    def _step_paused_world(self) -> None:
+        """One world.step while the timeline is paused: play it for exactly
+        this update, then pause it again. The timeline interface, not
+        world.play(), which can step internally."""
+        import omni.timeline
+
+        timeline = omni.timeline.get_timeline_interface()
+        timeline.play()
+        timeline.commit()
+        try:
+            self.world.step(render=True)
+        finally:
+            timeline.pause()
+            timeline.commit()
+
+    def _finish_step_tick(self) -> None:
+        request = self._step_request
+        request[0] -= 1
+        if request[0] > 0:
+            return
+        self._step_request = None
+        result: dict[str, Any] = {
+            "sim_time_s": self._mock_sim_time_s
+            if self.mock
+            else float(self.world.current_time),
+            "ticks": request[1],
+        }
+        if self._episode_writer is not None:
+            result["episode_frames"] = self._capture_frame_index
+        request[2].set_result(result)
+
+    def step(
+        self,
+        ticks: int = 1,
+        arms: Mapping[str, Sequence[float]] | None = None,
+        props: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """While paused, run exactly `ticks` loop iterations, each a whole
+        tick (queued tasks, rendering_dt of physics, one render, render
+        callbacks, episode capture) without real-time pacing, and return
+        once they have run.
+
+        arms (component name -> joint radians, teleported like
+        set_joint_positions) and props (name -> {"position",
+        "orientation_wxyz"}, like set_prop_pose) are applied together right
+        before the first tick, so it renders and captures exactly that
+        state. Everything is validated before anything is applied."""
+        self._require_booted()
+        if ticks < 1:
+            raise ValueError("step ticks must be at least 1")
+        arm_states = []
+        for name, values in (arms or {}).items():
+            entry = self._handles.get(str(name))
+            if entry is None or not isinstance(entry[1], ArmHandle):
+                raise ValueError(f"step: no arm named {name!r}")
+            handle = entry[1]
+            q = [float(v) for v in values]
+            dof = len(handle.joint_names())
+            if len(q) != dof:
+                raise ValueError(f"step: arm {name!r} needs {dof} joint values")
+            if not all(math.isfinite(v) for v in q):
+                raise ValueError(f"step: arm {name!r} values must be finite")
+            arm_states.append((handle, q))
+        prop_states = []
+        for name, pose in (props or {}).items():
+            if not isinstance(pose, Mapping):
+                raise ValueError(f"step: prop {name!r} needs position and orientation_wxyz")
+            prim_name, _spec = self._prop_spec(str(name))
+            prop_states.append(
+                (
+                    prim_name,
+                    _vector3(pose.get("position"), "position"),
+                    _quaternion(pose.get("orientation_wxyz"), "orientation_wxyz"),
+                )
+            )
+        done: Future = Future()
+
+        def request() -> None:
+            playing = self._mock_playing if self.mock else self.world.is_playing()
+            if playing:
+                raise RuntimeError("step requires the world to be paused")
+            if self._step_request is not None:
+                raise RuntimeError("another step is still running")
+            for handle, q in arm_states:
+                handle.set_joint_positions(q)
+            for prim_name, position, orientation in prop_states:
+                self._set_prop_pose(prim_name, position, orientation)
+            # the tick starts in this same loop iteration, right after this
+            self._step_request = [ticks, ticks, done]
+
+        self.run(request)
+        # ponytail: fixed wall budget; a step that outlasts it keeps running
+        return done.result(timeout=30.0 + ticks)
 
     def run_after_next_step(self, fn: Callable[[], Any], steps: int = 1) -> Future:
         """Sim thread only: run fn after `steps` more world.steps and resolve
@@ -1365,6 +1489,7 @@ class SimManager:
             return fn()
         fut: Future = Future()
         self._tasks.put((fn, fut))
+        self._task_ready.set()
         return fut.result(timeout=timeout)
 
     def _start_cosmos_captures(
@@ -1681,7 +1806,9 @@ class SimManager:
                         else float(self.world.current_time)
                     )
                     self._capture_frame_index = 0
-                    self._capture_skip_next_step = self.mock
+                    # the mock's first wall-clock step began before the
+                    # episode; a paused mock has no such step
+                    self._capture_skip_next_step = self.mock and self._mock_playing
                     self._capture_sample(self._capture_started_sim_s)
                     if self.mock:
                         self._step_callbacks["episode_capture"] = self._capture_step
@@ -2479,18 +2606,22 @@ class SimManager:
 
     def play(self) -> None:
         self._require_booted()
-        if not self.mock:
+        if self.mock:
+            self._mock_playing = True
+        else:
             self.run(lambda: self.world.play())
 
     def pause(self) -> None:
         self._require_booted()
-        if not self.mock:
+        if self.mock:
+            self._mock_playing = False
+        else:
             self.run(lambda: self.world.pause())
 
     def is_playing(self) -> bool:
         """Return whether the simulation timeline is playing."""
         if self.mock:
-            return True
+            return self._mock_playing
         self._require_booted()
         return self.run(lambda: bool(self.world.is_playing()))
 
@@ -4421,6 +4552,11 @@ class ArmHandle:
     def set_joint_targets(self, positions: list[float]) -> None:
         raise NotImplementedError
 
+    def set_joint_positions(self, positions: list[float]) -> None:
+        """Teleport the joints to positions (radians) at rest, and hold them
+        there: the target becomes positions too."""
+        raise NotImplementedError
+
     def wait_for_joint_targets(
         self, targets: Sequence[float], tolerance_rad: float
     ) -> Future[None]:
@@ -4619,13 +4755,34 @@ class IsaacArmHandle(ArmHandle):
     def get_joint_positions(self) -> list[float]:
         return self._sim.run(self._positions_on_sim_thread)
 
-    def set_joint_targets(self, positions: list[float]) -> None:
+    def _check_joint_values(self, positions: list[float]) -> None:
         if len(positions) != len(self._joint_indices):
             raise ValueError(
                 f"expected {len(self._joint_indices)} joint positions, got {len(positions)}"
             )
         if not all(math.isfinite(v) for v in positions):
             raise ValueError("joint targets must be finite")
+
+    def set_joint_positions(self, positions: list[float]) -> None:
+        self._check_joint_values(positions)
+
+        def _apply():
+            import numpy as np
+
+            q = np.asarray(positions, dtype=float)
+            self._art.set_joint_positions(q, joint_indices=self._joint_indices)
+            self._art.set_joint_velocities(
+                np.zeros(len(q)), joint_indices=self._joint_indices
+            )
+            # the drive and any speed ramp hold the new pose
+            self._target = list(positions)
+            self._commanded = list(positions)
+            self._apply_commanded()
+
+        self._sim.run(_apply)
+
+    def set_joint_targets(self, positions: list[float]) -> None:
+        self._check_joint_values(positions)
 
         def _apply():
             self._target = list(positions)
@@ -5073,6 +5230,16 @@ class MockArmHandle(ArmHandle):
                 )
             self._target = list(positions)
             self._t0 = now
+
+    def set_joint_positions(self, positions: list[float]) -> None:
+        with self._lock:
+            if len(positions) != len(self._start):
+                raise ValueError(
+                    f"expected {len(self._start)} joint positions, got {len(positions)}"
+                )
+            self._start = list(positions)
+            self._target = list(positions)
+            self._t0 = time.monotonic()
 
     def start_trajectory(self, points: Sequence[JointTrajectoryPoint]) -> Future[None]:
         if not points:

@@ -231,6 +231,54 @@ Task-specific placement and randomization belong in caller logic; see
 `examples/scripted_pick.py` for seeded workspace sampling. Existing `status`,
 `play`, `pause`, `reset`, and `add_usd` commands remain available.
 
+`{"command": "step", "ticks": N}` (`N` a whole number, default `1`) only works
+while the world is paused, and errors otherwise. It runs exactly `N` ticks of
+the sim loop, each what a playing tick does: apply queued commands, advance
+`rendering_dt` of simulator time and render once, run render callbacks, and take
+any episode capture sample due. Real-time pacing does not apply. It returns
+once the ticks have run, with `sim_time_s`, `ticks`, and, during an episode,
+`episode_frames` (samples captured so far). The world stays paused.
+
+`step` can also set a state right before its first tick, so that tick renders
+and captures exactly it:
+
+```json
+{
+  "command": "step",
+  "ticks": 1,
+  "arms": {"arm": [0.0, -0.5, 1.2, 0.0, 0.8, 0.0]},
+  "props": {"cup": {"position": [0.45, 0.05, 0.05], "orientation_wxyz": [1, 0, 0, 0]}}
+}
+```
+
+`arms` maps arm component names to joint radians, applied like the arm's
+`set_joint_positions_radians` (teleported, at rest, held). `props` maps prop
+names to poses, applied like `set_prop_pose`. Both are optional. Everything is
+validated first: a wrong joint count, a non-finite value, or an unknown arm or
+prop rejects the whole command with nothing applied. With `ticks` above 1, the
+state is set once, before the first tick.
+
+#### Replaying recorded states
+
+To record one episode frame per recorded state, at any client speed, step the
+paused world in lockstep with the client:
+
+1. `pause` the world, set the first state (arm `set_joint_positions_radians`,
+   `set_prop_pose` for each prop), then `start_episode`: its first sample is
+   that state.
+2. For each following state, send one `step` with its `arms` and `props`. Each
+   step captures exactly one sample of that state, for one round trip per
+   state.
+3. `stop_episode`. It first waits for the episode to have 33 frames, which a
+   paused world only gets from `step`: replay at least 33 states, or `play`
+   first, which records the last state until there are 33. `mark_episode_stage`
+   needs a playing world, so a paused replay is one stage.
+
+One sample per step needs `rendering_dt` equal to `1/capture_rate_hz` (the
+default whenever that is a whole number of physics steps). Set
+`capture_after_render: true` so each sample's images are rendered after the
+state it records.
+
 ### World state store
 
 Props and `add_usd` prims exist only in the simulator: they are not in the
@@ -413,6 +461,11 @@ For timestamped controllers, arm `DoCommand` accepts
 one finite radians target per arm joint, latches them, and returns immediately without waiting
 for waypoint settlement. `get_joint_positions_radians` returns the matching
 radian state used by policy clients.
+`{"command":"set_joint_positions_radians","values":[q0,...,qN]}` takes the same
+values but teleports: it sets the joints to them at zero velocity and latches
+them as the target, so the drive and any `max_joint_deg_s` ramp hold the new
+pose. Use it to replay recorded states exactly (see
+[Replaying recorded states](#replaying-recorded-states)).
 
 ### gripper attributes
 

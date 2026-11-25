@@ -99,6 +99,9 @@ With world_state_render "both" or "models", a usd prop publishes its mesh too.
 DoCommand:
   {"command": "status"} | {"command": "play"} | {"command": "pause"} |
   {"command": "reset"} |
+  {"command": "step", "ticks": 1, "arms": {"arm": [q0, ...]},
+   "props": {"pick_block": {"position": [x, y, z],
+                            "orientation_wxyz": [w, x, y, z]}}} (paused only) |
   {"command": "park_props", "props": ["pick_block"]} |
   {"command": "get_prop_pose", "prop": "pick_block"} |
   {"command": "set_prop_pose", "prop": "pick_block", "position": [x, y, z],
@@ -382,7 +385,7 @@ class IsaacWorld(Generic, EasyResource):
         sim = SimManager.get()
         cmd = str(command.get("command", ""))
         if cmd == "status":
-            status = sim.status()
+            status = await asyncio.to_thread(sim.status)
             sync = self._world_state
             if sync is not None:
                 status["world_state"] = {
@@ -392,22 +395,43 @@ class IsaacWorld(Generic, EasyResource):
                 }
             return status
         if cmd == "play":
-            sim.play()
+            await asyncio.to_thread(sim.play)
             return {"ok": True}
         if cmd == "pause":
-            sim.pause()
+            await asyncio.to_thread(sim.pause)
             return {"ok": True}
+        if cmd == "step":
+            ticks = command.get("ticks", 1)
+            if (
+                isinstance(ticks, bool)
+                or not isinstance(ticks, (int, float))
+                or ticks < 1
+                or ticks % 1
+            ):
+                raise ValueError("step ticks must be a whole number of at least 1")
+            arms = command.get("arms") or {}
+            props = command.get("props") or {}
+            if not isinstance(arms, Mapping) or not all(
+                isinstance(q, (list, tuple)) for q in arms.values()
+            ):
+                raise ValueError("step arms must map arm names to joint radians")
+            if not isinstance(props, Mapping):
+                raise ValueError("step props must map prop names to poses")
+            return await asyncio.to_thread(sim.step, int(ticks), arms, props)
         if cmd == "reset":
-            sim.reset()
+            await asyncio.to_thread(sim.reset)
             return {"ok": True}
         if cmd == "park_props":
             props = command.get("props") or []
-            return sim.park_props([str(name) for name in props])
+            return await asyncio.to_thread(
+                sim.park_props, [str(name) for name in props]
+            )
         if cmd == "get_prop_pose":
             prop = str(command.get("prop", ""))
             if not prop:
                 raise ValueError("get_prop_pose requires prop")
-            return {"prop": prop, "pose": sim.get_prop_pose(prop)}
+            pose = await asyncio.to_thread(sim.get_prop_pose, prop)
+            return {"prop": prop, "pose": pose}
         if cmd == "set_prop_pose":
             prop = str(command.get("prop", ""))
             if not prop:
@@ -418,7 +442,9 @@ class IsaacWorld(Generic, EasyResource):
             orientation = command.get("orientation_wxyz")
             if not orientation:
                 raise ValueError("set_prop_pose requires orientation_wxyz")
-            return sim.set_prop_pose(prop, position, orientation)
+            return await asyncio.to_thread(
+                sim.set_prop_pose, prop, position, orientation
+            )
         if cmd == "start_episode":
             target = command.get("target")
             if not isinstance(target, Mapping):
@@ -501,7 +527,8 @@ class IsaacWorld(Generic, EasyResource):
             if not usd_path or not prim_path:
                 raise ValueError("add_usd requires usd_path and prim_path")
             position = command.get("position") or [0.0, 0.0, 0.0]
-            sim.add_usd_reference(
+            await asyncio.to_thread(
+                sim.add_usd_reference,
                 usd_path,
                 prim_path,
                 tuple(float(v) for v in position),
@@ -510,7 +537,7 @@ class IsaacWorld(Generic, EasyResource):
             )
             return {"ok": True}
         raise ValueError(
-            f"unknown command {cmd!r}; supported: status, play, pause, reset, "
+            f"unknown command {cmd!r}; supported: status, play, pause, step, reset, "
             "park_props, get_prop_pose, set_prop_pose, start_episode, stop_episode, "
             "upload_episode, add_usd"
         )
