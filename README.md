@@ -231,6 +231,34 @@ Task-specific placement and randomization belong in caller logic; see
 `examples/scripted_pick.py` for seeded workspace sampling. Existing `status`,
 `play`, `pause`, `reset`, and `add_usd` commands remain available.
 
+`{"command": "step", "ticks": N}` (`N` a whole number, default `1`) only works
+while the world is paused, and errors otherwise. It runs exactly `N` ticks of
+the sim loop, each what a playing tick does: apply queued commands, advance
+`rendering_dt` of simulator time and render once, run render callbacks, and take
+any episode capture sample due. Real-time pacing does not apply. It returns
+once the ticks have run, with `sim_time_s`, `ticks`, and, during an episode,
+`episode_frames` (samples captured so far). The world stays paused.
+
+#### Replaying recorded states
+
+To record one episode frame per recorded state, at any client speed, step the
+paused world in lockstep with the client:
+
+1. `pause` the world, set the first state (arm `set_joint_positions_radians`,
+   `set_prop_pose` for each prop), then `start_episode`: its first sample is
+   that state.
+2. For each following state: set the arm and props, then `step`. Each step
+   captures exactly one sample of the state just set.
+3. `stop_episode`. It first waits for the episode to have 33 frames, which a
+   paused world only gets from `step`: replay at least 33 states, or `play`
+   first, which records the last state until there are 33. `mark_episode_stage`
+   needs a playing world, so a paused replay is one stage.
+
+One sample per step needs `rendering_dt` equal to `1/capture_rate_hz` (the
+default whenever that is a whole number of physics steps). Set
+`capture_after_render: true` so each sample's images are rendered after the
+state it records.
+
 ### World state store
 
 Props and `add_usd` prims exist only in the simulator: they are not in the

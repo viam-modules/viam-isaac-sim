@@ -1079,6 +1079,9 @@ class SimManager:
         self._after_step: list[list[Any]] = []
         self._loop_index = 0  # main_loop iterations started
         self._mock_sim_time_s = 0.0
+        self._mock_playing = True
+        # a `step` while paused: [ticks_left, ticks, future]
+        self._step_request: list[Any] | None = None
         self._stats = StepStats()
         # component name -> (spawn attrs, handle). viam-server rebuilds
         # resources on config change, but prims can't be re-spawned without
@@ -1216,14 +1219,20 @@ class SimManager:
             loop_start = time.perf_counter()
             self._loop_index += 1
             self._drain_tasks()
+            # this iteration is one tick of a `step` while paused
+            stepping = self._step_request is not None
             now = time.monotonic()
             dt = now - last
             last = now
+            if self.mock and stepping:
+                dt = self.cfg.resolved_rendering_dt()
+            elif self.mock and not self._mock_playing:
+                dt = 0.0
             for cb in list(self._step_callbacks.values()):
                 cb(dt)
             if self.mock:
                 # The mock integrates with wall-clock dt, so its sim clock is
-                # wall time elapsed since boot.
+                # wall time elapsed while playing.
                 self._mock_sim_time_s += dt
                 time.sleep(0.01)
                 self._flush_after_step()
@@ -1233,7 +1242,10 @@ class SimManager:
                 # substeps; physics callbacks fire once per substep.
                 sim_before = self.world.current_time
                 step_start = time.perf_counter()
-                self.world.step(render=True)
+                if stepping:
+                    self._step_paused_world()
+                else:
+                    self.world.step(render=True)
                 step_s = time.perf_counter() - step_start
                 # defensive clamp: a time rewind must never show up as negative sim time
                 sim_dt = max(0.0, self.world.current_time - sim_before)
@@ -1246,9 +1258,11 @@ class SimManager:
                 self._pause_idle_cameras()
                 if self._capture_after_render_active:
                     self._capture_after_render()
-                if pacer is not None:
+                if pacer is not None and not stepping:
                     pacer.after_step(step_dt)
             self._stats.record(step_s, time.perf_counter() - loop_start, sim_dt)
+            if stepping:
+                self._finish_step_tick()
 
         if self._episode_id is not None:
             try:
@@ -1273,6 +1287,59 @@ class SimManager:
                     fut.set_result(fn())
                 except BaseException as e:
                     fut.set_exception(e)
+
+    def _step_paused_world(self) -> None:
+        """One world.step while the timeline is paused: play it for exactly
+        this update, then pause it again. The timeline interface, not
+        world.play(), which can step internally."""
+        import omni.timeline
+
+        timeline = omni.timeline.get_timeline_interface()
+        timeline.play()
+        timeline.commit()
+        try:
+            self.world.step(render=True)
+        finally:
+            timeline.pause()
+            timeline.commit()
+
+    def _finish_step_tick(self) -> None:
+        request = self._step_request
+        request[0] -= 1
+        if request[0] > 0:
+            return
+        self._step_request = None
+        result: dict[str, Any] = {
+            "sim_time_s": self._mock_sim_time_s
+            if self.mock
+            else float(self.world.current_time),
+            "ticks": request[1],
+        }
+        if self._episode_writer is not None:
+            result["episode_frames"] = self._capture_frame_index
+        request[2].set_result(result)
+
+    def step(self, ticks: int = 1) -> dict[str, Any]:
+        """While paused, run exactly `ticks` loop iterations, each a whole
+        tick (queued tasks, rendering_dt of physics, one render, render
+        callbacks, episode capture) without real-time pacing, and return
+        once they have run."""
+        self._require_booted()
+        if ticks < 1:
+            raise ValueError("step ticks must be at least 1")
+        done: Future = Future()
+
+        def request() -> None:
+            playing = self._mock_playing if self.mock else self.world.is_playing()
+            if playing:
+                raise RuntimeError("step requires the world to be paused")
+            if self._step_request is not None:
+                raise RuntimeError("another step is still running")
+            self._step_request = [ticks, ticks, done]
+
+        self.run(request)
+        # ponytail: fixed wall budget; a step that outlasts it keeps running
+        return done.result(timeout=30.0 + ticks)
 
     def run_after_next_step(self, fn: Callable[[], Any], steps: int = 1) -> Future:
         """Sim thread only: run fn after `steps` more world.steps and resolve
@@ -1681,7 +1748,9 @@ class SimManager:
                         else float(self.world.current_time)
                     )
                     self._capture_frame_index = 0
-                    self._capture_skip_next_step = self.mock
+                    # the mock's first wall-clock step began before the
+                    # episode; a paused mock has no such step
+                    self._capture_skip_next_step = self.mock and self._mock_playing
                     self._capture_sample(self._capture_started_sim_s)
                     if self.mock:
                         self._step_callbacks["episode_capture"] = self._capture_step
@@ -2479,18 +2548,22 @@ class SimManager:
 
     def play(self) -> None:
         self._require_booted()
-        if not self.mock:
+        if self.mock:
+            self._mock_playing = True
+        else:
             self.run(lambda: self.world.play())
 
     def pause(self) -> None:
         self._require_booted()
-        if not self.mock:
+        if self.mock:
+            self._mock_playing = False
+        else:
             self.run(lambda: self.world.pause())
 
     def is_playing(self) -> bool:
         """Return whether the simulation timeline is playing."""
         if self.mock:
-            return True
+            return self._mock_playing
         self._require_booted()
         return self.run(lambda: bool(self.world.is_playing()))
 

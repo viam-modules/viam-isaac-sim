@@ -98,7 +98,7 @@ With world_state_render "both" or "models", a usd prop publishes its mesh too.
 
 DoCommand:
   {"command": "status"} | {"command": "play"} | {"command": "pause"} |
-  {"command": "reset"} |
+  {"command": "reset"} | {"command": "step", "ticks": 1} (paused only) |
   {"command": "park_props", "props": ["pick_block"]} |
   {"command": "get_prop_pose", "prop": "pick_block"} |
   {"command": "set_prop_pose", "prop": "pick_block", "position": [x, y, z],
@@ -397,6 +397,16 @@ class IsaacWorld(Generic, EasyResource):
         if cmd == "pause":
             await asyncio.to_thread(sim.pause)
             return {"ok": True}
+        if cmd == "step":
+            ticks = command.get("ticks", 1)
+            if (
+                isinstance(ticks, bool)
+                or not isinstance(ticks, (int, float))
+                or ticks < 1
+                or ticks % 1
+            ):
+                raise ValueError("step ticks must be a whole number of at least 1")
+            return await asyncio.to_thread(sim.step, int(ticks))
         if cmd == "reset":
             await asyncio.to_thread(sim.reset)
             return {"ok": True}
@@ -516,7 +526,7 @@ class IsaacWorld(Generic, EasyResource):
             )
             return {"ok": True}
         raise ValueError(
-            f"unknown command {cmd!r}; supported: status, play, pause, reset, "
+            f"unknown command {cmd!r}; supported: status, play, pause, step, reset, "
             "park_props, get_prop_pose, set_prop_pose, start_episode, stop_episode, "
             "upload_episode, add_usd"
         )
