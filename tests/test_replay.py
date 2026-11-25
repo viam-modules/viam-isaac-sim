@@ -2,6 +2,7 @@
 lockstep `step` while paused."""
 
 import asyncio
+import dataclasses
 import sys
 import threading
 import time
@@ -16,7 +17,7 @@ from isaac_module.models.arm import IsaacArm
 from isaac_module.models.camera import IsaacCamera
 from isaac_module.models.gripper import IsaacGripper
 from isaac_module.models.world import IsaacWorld
-from isaac_module.sim_manager import SimManager
+from isaac_module.sim_manager import SimConfig, SimManager
 
 
 def test_world_prop_commands_do_not_block_the_event_loop():
@@ -188,3 +189,79 @@ def test_step_paused_world_plays_the_timeline_for_one_update(monkeypatch):
     manager.world = SimpleNamespace(step=lambda render: events.append(("step", render)))
     manager._step_paused_world()
     assert events == ["play", "commit", ("step", True), "pause", "commit"]
+
+
+class _TimelineWorld:
+    """A stand-in Isaac World: time advances only while the timeline plays."""
+
+    def __init__(self, dt):
+        self.dt = dt
+        self.current_time = 0.0
+        self.playing = False
+        self.steps = 0
+
+    def is_playing(self):
+        return self.playing
+
+    def play(self):
+        self.playing = True
+
+    def pause(self):
+        self.playing = False
+
+    def step(self, render=True):
+        self.steps += 1
+        if self.playing:
+            self.current_time += self.dt
+
+
+@pytest.fixture
+def real_time_sim(monkeypatch):
+    """The non-mock loop with real_time pacing, over a stand-in World."""
+    dt = 0.4  # long, so a command left waiting out the period shows
+    fake = _TimelineWorld(dt)
+    timeline = SimpleNamespace(play=fake.play, pause=fake.pause, commit=lambda: None)
+    omni = SimpleNamespace(
+        timeline=SimpleNamespace(get_timeline_interface=lambda: timeline)
+    )
+    monkeypatch.setitem(sys.modules, "omni", omni)
+    monkeypatch.setitem(sys.modules, "omni.timeline", omni.timeline)
+    manager = SimManager()
+    manager.cfg = dataclasses.replace(
+        SimConfig(), physics_dt=dt, rendering_dt=dt, real_time=True
+    )
+
+    def boot():
+        manager.world = fake
+
+    manager._boot = boot
+    manager._boot_requested.set()
+    thread = threading.Thread(target=manager.main_loop, daemon=True)
+    thread.start()
+    assert manager._booted.wait(5)
+    yield manager, fake
+    manager.request_stop()
+    thread.join(timeout=5)
+
+
+def test_real_step_plays_the_timeline_for_exactly_its_ticks(real_time_sim):
+    manager, fake = real_time_sim
+    assert manager.step(1)["sim_time_s"] == pytest.approx(fake.dt)
+    assert manager.step(3) == {"sim_time_s": pytest.approx(4 * fake.dt), "ticks": 3}
+    assert not fake.playing
+    time.sleep(0.1)
+    assert fake.current_time == pytest.approx(4 * fake.dt)
+
+
+def test_paused_real_time_loop_serves_commands_without_waiting_out_the_period(
+    real_time_sim,
+):
+    manager, fake = real_time_sim
+    waits = []
+    for _ in range(5):
+        time.sleep(0.05)
+        start = time.perf_counter()
+        manager.run(lambda: None)
+        waits.append(time.perf_counter() - start)
+    # paced like a playing world, each would wait up to 0.4 s
+    assert max(waits) < 0.1

@@ -1060,6 +1060,8 @@ class SimManager:
 
     def __init__(self) -> None:
         self._tasks: queue.Queue[tuple[Callable[[], Any], Future]] = queue.Queue()
+        # set when a task is queued, so a paused loop can wake for it
+        self._task_ready = threading.Event()
         self._boot_requested = threading.Event()
         self._booted = threading.Event()
         self._boot_error: BaseException | None = None
@@ -1259,7 +1261,15 @@ class SimManager:
                 if self._capture_after_render_active:
                     self._capture_after_render()
                 if pacer is not None and not stepping:
-                    pacer.after_step(step_dt)
+                    if self.world.is_playing():
+                        pacer.after_step(step_dt)
+                    else:
+                        # paused, sim time holds: no clock to keep, so wake
+                        # for the next command instead of sleeping out the
+                        # period (a lockstep replay waits on every one)
+                        self._task_ready.wait(
+                            step_dt - (time.perf_counter() - loop_start)
+                        )
             self._stats.record(step_s, time.perf_counter() - loop_start, sim_dt)
             if stepping:
                 self._finish_step_tick()
@@ -1277,6 +1287,7 @@ class SimManager:
                 LOGGER.exception("error closing isaac sim")
 
     def _drain_tasks(self) -> None:
+        self._task_ready.clear()
         while True:
             try:
                 fn, fut = self._tasks.get_nowait()
@@ -1432,6 +1443,7 @@ class SimManager:
             return fn()
         fut: Future = Future()
         self._tasks.put((fn, fut))
+        self._task_ready.set()
         return fut.result(timeout=timeout)
 
     def _start_cosmos_captures(
