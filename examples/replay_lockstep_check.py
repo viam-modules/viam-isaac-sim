@@ -9,11 +9,13 @@ Runs, and prints JSON for, each check:
              `step` on a playing world errors
   teleport   set_joint_positions_radians 25 deg away, then 20 single steps:
              max joint deviation from the teleported pose
-  throughput paused replay of --states states (teleport + set prop gathered,
-             then step): states/s, median and p95 per state
-  concurrent three gathered get_prop_pose calls on a playing world
+  throughput paused replay of --states states, two ways: "two_call" (teleport
+             + set prop gathered, then step) and "combined" (one step
+             carrying arms and props): states/s, median and p95 per state
+  concurrent three gathered get_prop_pose calls on a playing world take at
+             most two ticks more than one call (not serialized to three)
   episode    (needs --gripper and cameras) paused replay of 41 states into
-             one native episode: frame count
+             one native episode, one combined step per state: frame count
 Leaves the world playing.
 """
 
@@ -97,25 +99,42 @@ async def check_teleport(arm, world):
     }
 
 
-async def check_throughput(arm, world, prop, home, states):
-    await world.do_command({"command": "pause"})
-    per_state = []
-    start = time.perf_counter()
-    for k in range(states):
-        t0 = time.perf_counter()
-        await _set(arm, world, prop, *_state(home, k))
-        await world.do_command({"command": "step"})
-        per_state.append(time.perf_counter() - t0)
-    wall = time.perf_counter() - start
+def _step_with(arm_name, prop, q, position):
     return {
-        "states_per_s": states / wall,
-        "median_s": statistics.median(per_state),
-        "p95_s": sorted(per_state)[int(0.95 * states)],
-        "baseline_states_per_s": 12.8,
+        "command": "step",
+        "arms": {arm_name: q},
+        "props": {prop: {"position": position, "orientation_wxyz": [1, 0, 0, 0]}},
     }
 
 
-async def check_concurrent(world, prop):
+async def check_throughput(arm, world, prop, home, states):
+    await world.do_command({"command": "pause"})
+
+    async def two_call(k):
+        await _set(arm, world, prop, *_state(home, k))
+        await world.do_command({"command": "step"})
+
+    async def combined(k):
+        await world.do_command(_step_with(arm.name, prop, *_state(home, k)))
+
+    report = {"baseline_states_per_s": 12.8}
+    for name, replay in (("two_call", two_call), ("combined", combined)):
+        per_state = []
+        start = time.perf_counter()
+        for k in range(states):
+            t0 = time.perf_counter()
+            await replay(k)
+            per_state.append(time.perf_counter() - t0)
+        wall = time.perf_counter() - start
+        report[name] = {
+            "states_per_s": states / wall,
+            "median_s": statistics.median(per_state),
+            "p95_s": sorted(per_state)[int(0.95 * states)],
+        }
+    return report
+
+
+async def check_concurrent(world, prop, rendering_dt):
     await world.do_command({"command": "play"})
     one = []
     for _ in range(5):
@@ -132,7 +151,9 @@ async def check_concurrent(world, prop):
     return {
         "single_median_s": statistics.median(one),
         "three_gathered_median_s": statistics.median(three),
-        "pass": statistics.median(three) < 2 * statistics.median(one),
+        # serialized, three calls would take three ticks
+        "pass": statistics.median(three)
+        <= statistics.median(one) + 2 * rendering_dt,
     }
 
 
@@ -158,8 +179,8 @@ async def check_episode(arm, world, prop, home, a):
     )
     frames = []
     for k in range(1, 41):
-        await _set(arm, world, prop, *_state(home, k))
-        frames.append((await world.do_command({"command": "step"}))["episode_frames"])
+        result = await world.do_command(_step_with(arm.name, prop, *_state(home, k)))
+        frames.append(result["episode_frames"])
     stopped = await world.do_command({"command": "stop_episode", "outcome": "success"})
     return {
         "pass": stopped.get("sample_count") == 41 and frames == list(range(2, 42)),
@@ -198,7 +219,7 @@ async def main() -> None:
             "step": lambda: check_step(world, rendering_dt),
             "teleport": lambda: check_teleport(arm, world),
             "throughput": lambda: check_throughput(arm, world, a.prop, home, a.states),
-            "concurrent": lambda: check_concurrent(world, a.prop),
+            "concurrent": lambda: check_concurrent(world, a.prop, rendering_dt),
         }
         if a.gripper:
             checks["episode"] = lambda: check_episode(arm, world, a.prop, home, a)
