@@ -382,7 +382,7 @@ class IsaacWorld(Generic, EasyResource):
         sim = SimManager.get()
         cmd = str(command.get("command", ""))
         if cmd == "status":
-            status = sim.status()
+            status = await asyncio.to_thread(sim.status)
             sync = self._world_state
             if sync is not None:
                 status["world_state"] = {
@@ -392,22 +392,25 @@ class IsaacWorld(Generic, EasyResource):
                 }
             return status
         if cmd == "play":
-            sim.play()
+            await asyncio.to_thread(sim.play)
             return {"ok": True}
         if cmd == "pause":
-            sim.pause()
+            await asyncio.to_thread(sim.pause)
             return {"ok": True}
         if cmd == "reset":
-            sim.reset()
+            await asyncio.to_thread(sim.reset)
             return {"ok": True}
         if cmd == "park_props":
             props = command.get("props") or []
-            return sim.park_props([str(name) for name in props])
+            return await asyncio.to_thread(
+                sim.park_props, [str(name) for name in props]
+            )
         if cmd == "get_prop_pose":
             prop = str(command.get("prop", ""))
             if not prop:
                 raise ValueError("get_prop_pose requires prop")
-            return {"prop": prop, "pose": sim.get_prop_pose(prop)}
+            pose = await asyncio.to_thread(sim.get_prop_pose, prop)
+            return {"prop": prop, "pose": pose}
         if cmd == "set_prop_pose":
             prop = str(command.get("prop", ""))
             if not prop:
@@ -418,7 +421,9 @@ class IsaacWorld(Generic, EasyResource):
             orientation = command.get("orientation_wxyz")
             if not orientation:
                 raise ValueError("set_prop_pose requires orientation_wxyz")
-            return sim.set_prop_pose(prop, position, orientation)
+            return await asyncio.to_thread(
+                sim.set_prop_pose, prop, position, orientation
+            )
         if cmd == "start_episode":
             target = command.get("target")
             if not isinstance(target, Mapping):
@@ -501,7 +506,8 @@ class IsaacWorld(Generic, EasyResource):
             if not usd_path or not prim_path:
                 raise ValueError("add_usd requires usd_path and prim_path")
             position = command.get("position") or [0.0, 0.0, 0.0]
-            sim.add_usd_reference(
+            await asyncio.to_thread(
+                sim.add_usd_reference,
                 usd_path,
                 prim_path,
                 tuple(float(v) for v in position),
