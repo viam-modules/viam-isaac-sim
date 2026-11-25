@@ -3,6 +3,7 @@ lockstep `step` while paused."""
 
 import asyncio
 import dataclasses
+import math
 import sys
 import threading
 import time
@@ -17,7 +18,7 @@ from isaac_module.models.arm import IsaacArm
 from isaac_module.models.camera import IsaacCamera
 from isaac_module.models.gripper import IsaacGripper
 from isaac_module.models.world import IsaacWorld
-from isaac_module.sim_manager import SimConfig, SimManager
+from isaac_module.sim_manager import ArmHandle, SimConfig, SimManager
 
 
 def test_world_prop_commands_do_not_block_the_event_loop():
@@ -79,7 +80,18 @@ def world():
     thread = threading.Thread(target=manager.main_loop, daemon=True)
     thread.start()
     try:
-        yield IsaacWorld.new(_config("sim-world", {"mock": True}), {})
+        yield IsaacWorld.new(
+            _config(
+                "sim-world",
+                {
+                    "mock": True,
+                    "props": [
+                        {"name": "block", "type": "cube", "position": [0.5, 0, 0.02]}
+                    ],
+                },
+            ),
+            {},
+        )
     finally:
         manager.request_stop()
         thread.join(timeout=5)
@@ -117,7 +129,7 @@ def test_step_advances_exactly_ticks_of_rendering_dt(world):
     assert sim.sim_time_s() > before + 3 * dt
 
 
-def test_replay_captures_one_frame_per_stepped_state(world, tmp_path):
+def _episode_components():
     arm = IsaacArm.new(
         _config("arm", {"world": "sim-world", "asset": "lite6", "mock_dof": 6}), {}
     )
@@ -129,6 +141,29 @@ def test_replay_captures_one_frame_per_stepped_state(world, tmp_path):
         IsaacCamera.new(
             _config(name, {"world": "sim-world", "width": 32, "height": 24}), {}
         )
+    return arm
+
+
+def _start_episode(output_dir):
+    return {
+        "command": "start_episode",
+        "output_dir": str(output_dir),
+        "episode_id": "000001",
+        "task": "replay",
+        "arm": "arm",
+        "gripper": "gripper",
+        "fixed_camera": "scene-cam",
+        "wrist_camera": "wrist-cam",
+        "target": {
+            "prop_name": "block",
+            "position_m": [0.5, 0.0, 0.0],
+            "rotation_wxyz": [1.0, 0.0, 0.0, 0.0],
+        },
+    }
+
+
+def test_replay_captures_one_frame_per_stepped_state(world, tmp_path):
+    arm = _episode_components()
     states = [[0.1 * (i + 1)] * 6 for i in range(5)]
 
     async def replay():
@@ -136,23 +171,7 @@ def test_replay_captures_one_frame_per_stepped_state(world, tmp_path):
         await arm.do_command(
             {"command": "set_joint_positions_radians", "values": states[0]}
         )
-        await world.do_command(
-            {
-                "command": "start_episode",
-                "output_dir": str(tmp_path),
-                "episode_id": "000001",
-                "task": "replay",
-                "arm": "arm",
-                "gripper": "gripper",
-                "fixed_camera": "scene-cam",
-                "wrist_camera": "wrist-cam",
-                "target": {
-                    "prop_name": "block",
-                    "position_m": [0.5, 0.0, 0.0],
-                    "rotation_wxyz": [1.0, 0.0, 0.0, 0.0],
-                },
-            }
-        )
+        await world.do_command(_start_episode(tmp_path))
         results = []
         for state in states[1:]:
             await arm.do_command(
@@ -171,6 +190,99 @@ def test_replay_captures_one_frame_per_stepped_state(world, tmp_path):
     for sample, state in zip(samples, states):
         # each state was applied before the tick that captured it
         assert sample["joint_position_rad"] == pytest.approx(state)
+
+
+def _prop(x):
+    return {"block": {"position": [x, 0.0, 0.02], "orientation_wxyz": [1, 0, 0, 0]}}
+
+
+def test_step_applies_its_state_before_the_tick_it_captures(world, tmp_path):
+    arm = _episode_components()
+    states = [[0.1 * (i + 1)] * 6 for i in range(5)]
+
+    async def replay():
+        await world.do_command({"command": "pause"})
+        await arm.do_command(
+            {"command": "set_joint_positions_radians", "values": states[0]}
+        )
+        await world.do_command(_start_episode(tmp_path))
+        results, poses = [], []
+        for k, state in enumerate(states[1:], start=1):
+            results.append(
+                await world.do_command(
+                    {"command": "step", "arms": {"arm": state}, "props": _prop(0.1 * k)}
+                )
+            )
+            pose = await world.do_command({"command": "get_prop_pose", "prop": "block"})
+            poses.append(pose["pose"]["position"][0])
+        await world.do_command({"command": "play"})
+        await world.do_command({"command": "stop_episode", "outcome": "success"})
+        return results, poses
+
+    results, poses = asyncio.run(replay())
+    assert [r["episode_frames"] for r in results] == [2, 3, 4, 5]
+    assert poses == pytest.approx([0.1, 0.2, 0.3, 0.4])
+    samples = pq.read_table(tmp_path / "000001" / "samples.parquet").to_pylist()
+    for sample, state in zip(samples, states):
+        assert sample["joint_position_rad"] == pytest.approx(state)
+
+
+def test_step_rejects_bad_state_and_applies_none_of_it(world):
+    arm = IsaacArm.new(
+        _config("arm", {"world": "sim-world", "asset": "lite6", "mock_dof": 6}), {}
+    )
+    sim = SimManager.get()
+    _do(world, {"command": "pause"})
+    before_q = arm._h().get_joint_positions()
+    before_pose = _do(world, {"command": "get_prop_pose", "prop": "block"})
+    before_t = sim.sim_time_s()
+    good_arm, good_prop = {"arm": [0.3] * 6}, _prop(0.9)
+    for arms, props, match in (
+        ({"arm": [0.3] * 5}, good_prop, "6 joint values"),
+        ({"arm": [math.nan] * 6}, good_prop, "finite"),
+        ({"nope": [0.3] * 6}, good_prop, "no arm"),
+        (good_arm, {"nope": good_prop["block"]}, "unknown prop"),
+        (good_arm, {"block": {"position": [1, 2]}}, "position"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            _do(world, {"command": "step", "arms": arms, "props": props})
+    assert arm._h().get_joint_positions() == before_q
+    assert _do(world, {"command": "get_prop_pose", "prop": "block"}) == before_pose
+    assert sim.sim_time_s() == before_t
+    _do(world, {"command": "play"})
+    with pytest.raises(RuntimeError, match="paused"):
+        _do(world, {"command": "step", "arms": good_arm, "props": good_prop})
+    assert arm._h().get_joint_positions() == pytest.approx(before_q, abs=1e-6)
+
+
+def test_real_step_applies_state_once_before_the_first_tick(real_time_sim):
+    manager, fake = real_time_sim
+    applied = []
+
+    class Arm(ArmHandle):
+        def joint_names(self):
+            return ("j1", "j2")
+
+        def set_joint_positions(self, positions):
+            applied.append(("arm", list(positions), fake.current_time, fake.steps))
+
+    manager._handles["arm"] = ({}, Arm())
+    manager._prop_specs["block"] = {"name": "block"}
+    manager._set_prop_pose = lambda name, position, orientation: applied.append(
+        ("prop", name, fake.current_time, fake.steps)
+    )
+    start_time = fake.current_time
+    pose = {"position": [1, 2, 3], "orientation_wxyz": [1, 0, 0, 0]}
+    result = manager.step(3, {"arm": [0.1, 0.2]}, {"block": pose})
+    assert result["sim_time_s"] == pytest.approx(start_time + 3 * fake.dt)
+    assert len(applied) == 2
+    (_, q, arm_t, arm_steps), (_, name, prop_t, prop_steps) = applied
+    assert q == [0.1, 0.2] and name == "block"
+    assert arm_t == prop_t == start_time  # before the first tick
+    # the three stepped ticks are the next world.steps after applying it
+    assert arm_steps == prop_steps
+    assert fake.log[arm_steps : arm_steps + 3] == [True] * 3
+    assert True not in fake.log[:arm_steps]
 
 
 def test_step_paused_world_plays_the_timeline_for_one_update(monkeypatch):
@@ -199,6 +311,7 @@ class _TimelineWorld:
         self.current_time = 0.0
         self.playing = False
         self.steps = 0
+        self.log = []  # per world.step: was the timeline playing
 
     def is_playing(self):
         return self.playing
@@ -211,6 +324,7 @@ class _TimelineWorld:
 
     def step(self, render=True):
         self.steps += 1
+        self.log.append(self.playing)
         if self.playing:
             self.current_time += self.dt
 

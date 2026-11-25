@@ -1335,14 +1335,50 @@ class SimManager:
             result["episode_frames"] = self._capture_frame_index
         request[2].set_result(result)
 
-    def step(self, ticks: int = 1) -> dict[str, Any]:
+    def step(
+        self,
+        ticks: int = 1,
+        arms: Mapping[str, Sequence[float]] | None = None,
+        props: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """While paused, run exactly `ticks` loop iterations, each a whole
         tick (queued tasks, rendering_dt of physics, one render, render
         callbacks, episode capture) without real-time pacing, and return
-        once they have run."""
+        once they have run.
+
+        arms (component name -> joint radians, teleported like
+        set_joint_positions) and props (name -> {"position",
+        "orientation_wxyz"}, like set_prop_pose) are applied together right
+        before the first tick, so it renders and captures exactly that
+        state. Everything is validated before anything is applied."""
         self._require_booted()
         if ticks < 1:
             raise ValueError("step ticks must be at least 1")
+        arm_states = []
+        for name, values in (arms or {}).items():
+            entry = self._handles.get(str(name))
+            if entry is None or not isinstance(entry[1], ArmHandle):
+                raise ValueError(f"step: no arm named {name!r}")
+            handle = entry[1]
+            q = [float(v) for v in values]
+            dof = len(handle.joint_names())
+            if len(q) != dof:
+                raise ValueError(f"step: arm {name!r} needs {dof} joint values")
+            if not all(math.isfinite(v) for v in q):
+                raise ValueError(f"step: arm {name!r} values must be finite")
+            arm_states.append((handle, q))
+        prop_states = []
+        for name, pose in (props or {}).items():
+            if not isinstance(pose, Mapping):
+                raise ValueError(f"step: prop {name!r} needs position and orientation_wxyz")
+            prim_name, _spec = self._prop_spec(str(name))
+            prop_states.append(
+                (
+                    prim_name,
+                    _vector3(pose.get("position"), "position"),
+                    _quaternion(pose.get("orientation_wxyz"), "orientation_wxyz"),
+                )
+            )
         done: Future = Future()
 
         def request() -> None:
@@ -1351,6 +1387,11 @@ class SimManager:
                 raise RuntimeError("step requires the world to be paused")
             if self._step_request is not None:
                 raise RuntimeError("another step is still running")
+            for handle, q in arm_states:
+                handle.set_joint_positions(q)
+            for prim_name, position, orientation in prop_states:
+                self._set_prop_pose(prim_name, position, orientation)
+            # the tick starts in this same loop iteration, right after this
             self._step_request = [ticks, ticks, done]
 
         self.run(request)

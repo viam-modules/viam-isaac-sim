@@ -98,7 +98,10 @@ With world_state_render "both" or "models", a usd prop publishes its mesh too.
 
 DoCommand:
   {"command": "status"} | {"command": "play"} | {"command": "pause"} |
-  {"command": "reset"} | {"command": "step", "ticks": 1} (paused only) |
+  {"command": "reset"} |
+  {"command": "step", "ticks": 1, "arms": {"arm": [q0, ...]},
+   "props": {"pick_block": {"position": [x, y, z],
+                            "orientation_wxyz": [w, x, y, z]}}} (paused only) |
   {"command": "park_props", "props": ["pick_block"]} |
   {"command": "get_prop_pose", "prop": "pick_block"} |
   {"command": "set_prop_pose", "prop": "pick_block", "position": [x, y, z],
@@ -406,7 +409,15 @@ class IsaacWorld(Generic, EasyResource):
                 or ticks % 1
             ):
                 raise ValueError("step ticks must be a whole number of at least 1")
-            return await asyncio.to_thread(sim.step, int(ticks))
+            arms = command.get("arms") or {}
+            props = command.get("props") or {}
+            if not isinstance(arms, Mapping) or not all(
+                isinstance(q, (list, tuple)) for q in arms.values()
+            ):
+                raise ValueError("step arms must map arm names to joint radians")
+            if not isinstance(props, Mapping):
+                raise ValueError("step props must map prop names to poses")
+            return await asyncio.to_thread(sim.step, int(ticks), arms, props)
         if cmd == "reset":
             await asyncio.to_thread(sim.reset)
             return {"ok": True}

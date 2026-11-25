@@ -239,6 +239,25 @@ any episode capture sample due. Real-time pacing does not apply. It returns
 once the ticks have run, with `sim_time_s`, `ticks`, and, during an episode,
 `episode_frames` (samples captured so far). The world stays paused.
 
+`step` can also set a state right before its first tick, so that tick renders
+and captures exactly it:
+
+```json
+{
+  "command": "step",
+  "ticks": 1,
+  "arms": {"arm": [0.0, -0.5, 1.2, 0.0, 0.8, 0.0]},
+  "props": {"cup": {"position": [0.45, 0.05, 0.05], "orientation_wxyz": [1, 0, 0, 0]}}
+}
+```
+
+`arms` maps arm component names to joint radians, applied like the arm's
+`set_joint_positions_radians` (teleported, at rest, held). `props` maps prop
+names to poses, applied like `set_prop_pose`. Both are optional. Everything is
+validated first: a wrong joint count, a non-finite value, or an unknown arm or
+prop rejects the whole command with nothing applied. With `ticks` above 1, the
+state is set once, before the first tick.
+
 #### Replaying recorded states
 
 To record one episode frame per recorded state, at any client speed, step the
@@ -247,8 +266,9 @@ paused world in lockstep with the client:
 1. `pause` the world, set the first state (arm `set_joint_positions_radians`,
    `set_prop_pose` for each prop), then `start_episode`: its first sample is
    that state.
-2. For each following state: set the arm and props, then `step`. Each step
-   captures exactly one sample of the state just set.
+2. For each following state, send one `step` with its `arms` and `props`. Each
+   step captures exactly one sample of that state, for one round trip per
+   state.
 3. `stop_episode`. It first waits for the episode to have 33 frames, which a
    paused world only gets from `step`: replay at least 33 states, or `play`
    first, which records the last state until there are 33. `mark_episode_stage`
