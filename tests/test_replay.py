@@ -265,3 +265,14 @@ def test_paused_real_time_loop_serves_commands_without_waiting_out_the_period(
         waits.append(time.perf_counter() - start)
     # paced like a playing world, each would wait up to 0.4 s
     assert max(waits) < 0.1
+
+
+def test_paused_loop_serves_commands_between_renders(real_time_sim):
+    # a paused frame between every command and the step after it would make
+    # each replayed state wait out an extra render
+    manager, fake = real_time_sim
+    time.sleep(0.05)
+    before = fake.steps
+    for _ in range(10):
+        manager.run(lambda: None)
+    assert fake.steps - before <= 2  # renders hold their own cadence

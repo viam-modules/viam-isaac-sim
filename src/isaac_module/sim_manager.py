@@ -1264,12 +1264,17 @@ class SimManager:
                     if self.world.is_playing():
                         pacer.after_step(step_dt)
                     else:
-                        # paused, sim time holds: no clock to keep, so wake
-                        # for the next command instead of sleeping out the
-                        # period (a lockstep replay waits on every one)
-                        self._task_ready.wait(
-                            step_dt - (time.perf_counter() - loop_start)
-                        )
+                        # paused, sim time holds: no clock to keep, so serve
+                        # commands as they arrive instead of sleeping out the
+                        # period, without a render each (a lockstep replay
+                        # waits on every one); a step starts its tick now
+                        deadline = loop_start + step_dt
+                        while (
+                            self._step_request is None
+                            and (left := deadline - time.perf_counter()) > 0
+                            and self._task_ready.wait(left)
+                        ):
+                            self._drain_tasks()
             self._stats.record(step_s, time.perf_counter() - loop_start, sim_dt)
             if stepping:
                 self._finish_step_tick()
