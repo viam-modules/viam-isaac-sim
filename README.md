@@ -413,6 +413,11 @@ For timestamped controllers, arm `DoCommand` accepts
 one finite radians target per arm joint, latches them, and returns immediately without waiting
 for waypoint settlement. `get_joint_positions_radians` returns the matching
 radian state used by policy clients.
+`{"command":"set_joint_positions_radians","values":[q0,...,qN]}` takes the same
+values but teleports: it sets the joints to them at zero velocity and latches
+them as the target, so the drive and any `max_joint_deg_s` ramp hold the new
+pose. Use it to replay recorded states exactly (see
+[Replaying recorded states](#replaying-recorded-states)).
 
 ### gripper attributes
 

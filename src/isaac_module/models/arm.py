@@ -678,14 +678,20 @@ class IsaacArm(Arm, EasyResource):
             )
         if cmd == "dynamics_metadata":
             return await asyncio.to_thread(self._h().dynamics_metadata)
-        if cmd == "set_joint_targets_radians":
+        if cmd in ("set_joint_targets_radians", "set_joint_positions_radians"):
+            handle = self._h()
             raw = command.get("values")
-            dof = len(self._h().joint_names())
+            dof = len(handle.joint_names())
             if not isinstance(raw, (list, tuple)) or len(raw) != dof:
-                raise ValueError(f"set_joint_targets_radians requires {dof} values")
-            targets = [float(value) for value in cast(Any, raw)]
-            if not all(math.isfinite(value) for value in targets):
-                raise ValueError("set_joint_targets_radians values must be finite")
-            await asyncio.to_thread(self._h().set_joint_targets, targets)
+                raise ValueError(f"{cmd} requires {dof} values")
+            values = [float(value) for value in cast(Any, raw)]
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError(f"{cmd} values must be finite")
+            setter = (
+                handle.set_joint_targets
+                if cmd == "set_joint_targets_radians"
+                else handle.set_joint_positions
+            )
+            await asyncio.to_thread(setter, values)
             return {"accepted": True}
         raise ValueError(f"unknown command: {command}")

@@ -4421,6 +4421,11 @@ class ArmHandle:
     def set_joint_targets(self, positions: list[float]) -> None:
         raise NotImplementedError
 
+    def set_joint_positions(self, positions: list[float]) -> None:
+        """Teleport the joints to positions (radians) at rest, and hold them
+        there: the target becomes positions too."""
+        raise NotImplementedError
+
     def wait_for_joint_targets(
         self, targets: Sequence[float], tolerance_rad: float
     ) -> Future[None]:
@@ -4619,13 +4624,34 @@ class IsaacArmHandle(ArmHandle):
     def get_joint_positions(self) -> list[float]:
         return self._sim.run(self._positions_on_sim_thread)
 
-    def set_joint_targets(self, positions: list[float]) -> None:
+    def _check_joint_values(self, positions: list[float]) -> None:
         if len(positions) != len(self._joint_indices):
             raise ValueError(
                 f"expected {len(self._joint_indices)} joint positions, got {len(positions)}"
             )
         if not all(math.isfinite(v) for v in positions):
             raise ValueError("joint targets must be finite")
+
+    def set_joint_positions(self, positions: list[float]) -> None:
+        self._check_joint_values(positions)
+
+        def _apply():
+            import numpy as np
+
+            q = np.asarray(positions, dtype=float)
+            self._art.set_joint_positions(q, joint_indices=self._joint_indices)
+            self._art.set_joint_velocities(
+                np.zeros(len(q)), joint_indices=self._joint_indices
+            )
+            # the drive and any speed ramp hold the new pose
+            self._target = list(positions)
+            self._commanded = list(positions)
+            self._apply_commanded()
+
+        self._sim.run(_apply)
+
+    def set_joint_targets(self, positions: list[float]) -> None:
+        self._check_joint_values(positions)
 
         def _apply():
             self._target = list(positions)
@@ -5073,6 +5099,16 @@ class MockArmHandle(ArmHandle):
                 )
             self._target = list(positions)
             self._t0 = now
+
+    def set_joint_positions(self, positions: list[float]) -> None:
+        with self._lock:
+            if len(positions) != len(self._start):
+                raise ValueError(
+                    f"expected {len(self._start)} joint positions, got {len(positions)}"
+                )
+            self._start = list(positions)
+            self._target = list(positions)
+            self._t0 = time.monotonic()
 
     def start_trajectory(self, points: Sequence[JointTrajectoryPoint]) -> Future[None]:
         if not points:

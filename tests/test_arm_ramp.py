@@ -130,3 +130,24 @@ def test_reset_world_clears_ramp_state_before_resetting():
     mgr._handles["arm"] = ({}, h)
     mgr._reset_world()
     assert seen == [(None, None)]  # cleared before world.reset ran
+
+
+def test_teleport_sets_state_and_target_so_the_ramp_holds():
+    class Art(_FakeArt):
+        def set_joint_positions(self, values, *, joint_indices):
+            for value, index in zip(values, joint_indices):
+                self.positions[index] = float(value)
+
+    sim = _FakeSim()
+    art = Art([0.3, -0.3])
+    h = IsaacArmHandle(sim, art, None, "/World/arm", max_joint_deg_s=60.0)
+    h.set_joint_positions([0.5, -0.5])
+    assert art.positions == [0.5, -0.5]
+    assert art._vels == [0.0, 0.0]
+    assert h._target == h._commanded == [0.5, -0.5]
+    assert art.actions[-1].joint_positions.tolist() == pytest.approx([0.5, -0.5])
+    actions = len(art.actions)
+    sim.world.callbacks[f"arm_ramp_{id(h)}"](0.1)
+    assert len(art.actions) == actions  # nothing left to ramp toward
+    with pytest.raises(ValueError, match="finite"):
+        h.set_joint_positions([math.inf, 0.0])
