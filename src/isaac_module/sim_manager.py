@@ -2502,6 +2502,8 @@ class SimManager:
         a sibling arm's joints)."""
         for _, handle in list(self._handles.values()):
             if isinstance(handle, IsaacArmHandle):
+                handle._clear_servo()
+                handle._snapshot = None
                 handle._target = None
                 handle._commanded = None
         swerve = [h for _, h in list(self._handles.values()) if isinstance(h, SwerveBaseHandle)]
@@ -4421,6 +4423,11 @@ class ArmHandle:
     def set_joint_targets(self, positions: list[float]) -> None:
         raise NotImplementedError
 
+    def servo_target(self, positions: Sequence[float]) -> None:
+        """Stream one setpoint of a continuous command (teleop) without waiting
+        for the sim thread. Handles without a servo path apply it as a target."""
+        self.set_joint_targets(list(positions))
+
     def wait_for_joint_targets(
         self, targets: Sequence[float], tolerance_rad: float
     ) -> Future[None]:
@@ -4527,6 +4534,13 @@ class ArmHandle:
 
 
 class IsaacArmHandle(ArmHandle):
+    # Servo state defaults, for handles built without __init__ (tests).
+    _servo_lock: Any = None
+    _servo_inbox: list[float] | None = None
+    _servo_goal: list[float] | None = None
+    _servo_attached = False
+    _snapshot: tuple[list[float], float] | None = None
+
     def __init__(
         self,
         sim: SimManager,
@@ -4595,6 +4609,18 @@ class IsaacArmHandle(ArmHandle):
             self._sim.world.add_physics_callback(
                 self._ramp_callback_name, self._on_ramp_step
             )
+        # Servo path: RPC threads drop setpoints in the inbox and return; the
+        # physics callback applies the newest one on its next step.
+        self._servo_lock = threading.Lock()
+        self._servo_inbox = None
+        self._servo_goal: list[float] | None = None
+        # Joint positions as of the latest physics step, so reads don't wait
+        # for the sim thread: (positions, time.monotonic()).
+        self._snapshot = None
+        self._servo_callback_name = f"arm_servo_{id(self)}"
+        # Attached on first read or servo setpoint, then never detached (like
+        # the ramp): handles live as long as the module.
+        self._servo_attached = False
 
     def joint_names(self) -> tuple[str, ...]:
         return self._joint_names
@@ -4617,9 +4643,24 @@ class IsaacArmHandle(ArmHandle):
         ]
 
     def get_joint_positions(self) -> list[float]:
-        return self._sim.run(self._positions_on_sim_thread)
+        snapshot = self._snapshot
+        if snapshot is not None and time.monotonic() - snapshot[1] <= JOINT_SNAPSHOT_MAX_AGE_S:
+            return list(snapshot[0])
+        def _read() -> list[float]:
+            self._attach_servo()
+            return self._positions_on_sim_thread()
 
-    def set_joint_targets(self, positions: list[float]) -> None:
+        return self._sim.run(_read)
+
+    def _attach_servo(self) -> None:
+        """Sim thread: start the per-physics-step snapshot and servo callback."""
+        if not self._servo_attached:
+            self._sim.world.add_physics_callback(
+                self._servo_callback_name, self._on_servo_step
+            )
+            self._servo_attached = True
+
+    def _check_targets(self, positions: Sequence[float]) -> None:
         if len(positions) != len(self._joint_indices):
             raise ValueError(
                 f"expected {len(self._joint_indices)} joint positions, got {len(positions)}"
@@ -4627,7 +4668,53 @@ class IsaacArmHandle(ArmHandle):
         if not all(math.isfinite(v) for v in positions):
             raise ValueError("joint targets must be finite")
 
+    def servo_target(self, positions: Sequence[float]) -> None:
+        """Hand the newest teleop setpoint to the physics callback and return
+        without waiting for the sim thread. The callback applies it on its next
+        physics step (capped by max_joint_deg_s)."""
+        self._check_targets(positions)
+        if not self._servo_attached:
+            self._sim.run(self._attach_servo)  # once per handle
+        goal = [float(v) for v in positions]
+        with self._servo_lock:
+            self._servo_inbox = goal
+
+    def _clear_servo(self) -> None:
+        """Sim thread: drop any pending or in-progress servo motion."""
+        if self._servo_lock is not None:
+            with self._servo_lock:
+                self._servo_inbox = None
+        self._servo_goal = None
+
+    def _on_servo_step(self, step_size: float) -> None:
+        try:
+            self._snapshot = (self._positions_on_sim_thread(), time.monotonic())
+            with self._servo_lock:
+                inbox, self._servo_inbox = self._servo_inbox, None
+            if inbox is not None and not self._trajectory_attached:
+                self._servo_goal = inbox
+            goal = self._servo_goal
+            if goal is None:
+                return
+            point = list(goal)
+            if self._max_joint_rad_s is not None and self._commanded is not None:
+                point = ramp_toward(
+                    self._commanded, point, self._max_joint_rad_s * float(step_size)
+                )
+            # target == commanded, so the ramp callback leaves it alone
+            self._target = list(point)
+            self._commanded = list(point)
+            self._apply_commanded()
+            if point == goal:
+                self._servo_goal = None
+        except Exception:
+            LOGGER.exception("arm %s servo step failed", self._prim_path)
+
+    def set_joint_targets(self, positions: list[float]) -> None:
+        self._check_targets(positions)
+
         def _apply():
+            self._clear_servo()
             self._target = list(positions)
             if self._max_joint_rad_s is None:
                 self._commanded = list(positions)
@@ -4716,6 +4803,7 @@ class IsaacArmHandle(ArmHandle):
                 trajectory.append((point.time_s, action, positions))
                 previous_time = point.time_s
 
+            self._clear_servo()
             self._trajectory = trajectory
             self._trajectory_index = 0
             self._trajectory_elapsed_s = 0.0
@@ -4757,6 +4845,7 @@ class IsaacArmHandle(ArmHandle):
             if self._trajectory_attached:
                 self._sim.world.remove_physics_callback(self._trajectory_callback_name)
                 self._trajectory_attached = False
+            self._clear_servo()
             current = tuple(
                 float(value)
                 for value in self._art.get_joint_positions(
@@ -6247,6 +6336,9 @@ def asset_cache_dir() -> Path:
 # ponytail: fixed band; Mabel's torso jitters ~1.2 deg around a reached
 # target. Make it per-arm (path_tolerance_delta_deg) if a real arm needs tighter.
 STOP_KEEPS_TARGET_WITHIN_RAD = math.radians(2.0)
+# Joint reads use the latest physics-step snapshot while it is this fresh, else
+# (sim paused, not yet stepped) read on the sim thread.
+JOINT_SNAPSHOT_MAX_AGE_S = 0.25
 URDF_IMPORT_VERSION = 2
 # a cold import of a big robot (Mabel: ~150 meshes) takes minutes, longer than
 # the 120 s spawn budget, so it gets its own
