@@ -502,6 +502,15 @@ class MockBodyHandle(BodyHandle):
         self.reset_motion(self._position, quat_from_yaw(yaw))
 
 
+def _positive_max_rpm(max_rpm: float) -> float:
+    """Power is rpm / max_rpm everywhere in the handle, so a zero or negative
+    limit would divide by zero or flip the direction of every command."""
+    max_rpm = float(max_rpm)
+    if not math.isfinite(max_rpm) or max_rpm <= 0.0:
+        raise ValueError("max_rpm must be finite and positive")
+    return max_rpm
+
+
 class MotorHandle:
     """A thruster. All the physics lives on the body; this just sets the
     command and reads back the integrated odometry."""
@@ -518,9 +527,10 @@ class MotorHandle:
         self._state = state
         self.max_thrust_n = max_thrust_n
         self.reverse_thrust_n = reverse_thrust_n
-        self.max_rpm = max_rpm
+        self.max_rpm = _positive_max_rpm(max_rpm)
 
     def update_limits(self, max_thrust_n: float, reverse_thrust_n: float, max_rpm: float) -> None:
+        max_rpm = _positive_max_rpm(max_rpm)
         with self.body._lock:
             power = self._state.rpm / self.max_rpm
             target = self._state.target_revolutions

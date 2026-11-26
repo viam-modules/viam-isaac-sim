@@ -469,6 +469,13 @@ def test_go_for_target_is_enforced_on_the_physics_step():
     handle.update_limits(max_thrust_n=20.0, reverse_thrust_n=5.0, max_rpm=1200.0)
     assert state.rpm == 1200.0 and state.force_n == 20.0
     assert state.target_revolutions == pytest.approx(2.0)
+    # power is rpm / max_rpm, so the handle refuses a limit it cannot divide by
+    for bad in (0.0, -600.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="max_rpm"):
+            handle.update_limits(max_thrust_n=20.0, reverse_thrust_n=5.0, max_rpm=bad)
+        with pytest.raises(ValueError, match="max_rpm"):
+            MotorHandle(body, state, max_thrust_n=10.0, reverse_thrust_n=5.0, max_rpm=bad)
+    assert handle.max_rpm == 1200.0 and state.rpm == 1200.0
 
 
 def test_paired_thrusters_commanded_together_stop_together(boat):
