@@ -558,6 +558,33 @@ def cameras_to_pause(
     ]
 
 
+def profile_step(
+    remaining: float,
+    speed: float,
+    max_speed: float,
+    max_acceleration: float | None,
+    dt: float,
+) -> tuple[float, float]:
+    """One step of a trapezoidal speed profile along a path with `remaining`
+    length to go: speed up by at most max_acceleration, cruise at max_speed,
+    and slow so the path ends at rest. Returns (distance to advance this step,
+    new speed). Without an acceleration limit the speed is max_speed at once."""
+    if remaining <= 0.0 or dt <= 0.0:
+        return 0.0, 0.0
+    if max_acceleration is None:
+        new_speed = max_speed
+    else:
+        new_speed = min(
+            speed + max_acceleration * dt,
+            max_speed,
+            math.sqrt(2.0 * max_acceleration * remaining),
+        )
+    advance = new_speed * dt
+    if advance >= remaining:
+        return remaining, 0.0
+    return advance, new_speed
+
+
 def ramp_toward(
     current: Sequence[float], goal: Sequence[float], max_step: float
 ) -> list[float]:
@@ -2504,6 +2531,7 @@ class SimManager:
             if isinstance(handle, IsaacArmHandle):
                 handle._clear_servo()
                 handle._snapshot = None
+                handle._via, handle._path_speed, handle._path_velocity = [], 0.0, None
                 handle._target = None
                 handle._commanded = None
         swerve = [h for _, h in list(self._handles.values()) if isinstance(h, SwerveBaseHandle)]
@@ -4428,6 +4456,16 @@ class ArmHandle:
         for the sim thread. Handles without a servo path apply it as a target."""
         self.set_joint_targets(list(positions))
 
+    def follow_path(self, waypoints: Sequence[Sequence[float]]) -> None:
+        """Move through the waypoints and stop at the last. Handles without a
+        path follower go straight to the last one."""
+        if not waypoints:
+            raise ValueError("a path needs at least one waypoint")
+        self.set_joint_targets(list(waypoints[-1]))
+
+    def path_active(self) -> bool:
+        return False
+
     def wait_for_joint_targets(
         self, targets: Sequence[float], tolerance_rad: float
     ) -> Future[None]:
@@ -4542,6 +4580,11 @@ class IsaacArmHandle(ArmHandle):
     _servo_goal: list[float] | None = None
     _servo_attached = False
     _snapshot: tuple[list[float], float] | None = None
+    # Path state defaults, likewise: waypoints before _target, the speed along
+    # the path (fastest joint, rad/s), and the last step's joint velocities.
+    _via: Sequence[list[float]] = ()
+    _path_speed = 0.0
+    _path_velocity: list[float] | None = None
 
     def __init__(
         self,
@@ -4735,30 +4778,90 @@ class IsaacArmHandle(ArmHandle):
             LOGGER.exception("arm %s servo step failed", self._prim_path)
 
     def set_joint_targets(self, positions: list[float]) -> None:
-        self._check_targets(positions)
+        self.follow_path([positions])
+
+    def follow_path(self, waypoints: Sequence[Sequence[float]]) -> None:
+        """Move through the waypoints and stop at the last one. With a speed
+        limit the arm follows the straight joint-space segments between them
+        under a trapezoidal speed profile, stepped by the physics callback (so
+        in simulator time); without one the last waypoint is applied at once."""
+        if not waypoints:
+            raise ValueError("a path needs at least one waypoint")
+        for waypoint in waypoints:
+            self._check_targets(waypoint)
+        path = [[float(v) for v in waypoint] for waypoint in waypoints]
 
         def _apply():
             self._clear_servo()
-            self._target = list(positions)
+            self._target = path[-1]
             if self._max_joint_rad_s is None:
-                self._commanded = list(positions)
+                self._via = []
+                self._commanded = list(path[-1])
                 self._apply_commanded()
-            elif self._commanded is None:
+                return
+            if self._commanded is None:
                 # Measured pose includes any active nudge. A nudge stored across
                 # a reset is re-applied in one step on the next command; nudges
                 # are small, so that is negligible.
                 self._commanded = self._positions_on_sim_thread()
+            self._via = path[:-1]
+            self._path_speed = self._speed_toward(path[0])
 
         self._sim.run(_apply)
+
+    def _speed_toward(self, waypoint: Sequence[float]) -> float:
+        """The speed the arm already has in the direction of a new path's first
+        waypoint, so retargeting mid-move neither stops nor reverses abruptly."""
+        velocity, commanded = self._path_velocity, self._commanded
+        if velocity is None or commanded is None:
+            return 0.0
+        deltas = [w - c for c, w in zip(commanded, waypoint)]
+        biggest = max((abs(d) for d in deltas), default=0.0)
+        if biggest == 0.0:
+            return 0.0
+        unit = [d / biggest for d in deltas]
+        along = sum(v * u for v, u in zip(velocity, unit)) / sum(u * u for u in unit)
+        return min(max(0.0, along), self._max_joint_rad_s or 0.0)
+
+    def path_active(self) -> bool:
+        """True while a latched path or servo setpoint is still being played."""
+        commanded, target = self._commanded, self._target
+        return self._servo_goal is not None or (
+            commanded is not None and target is not None and commanded != target
+        )
 
     def _on_ramp_step(self, step_size: float) -> None:
         commanded, target = self._commanded, self._target
         if commanded is None or target is None or commanded == target:
+            # also after a servo, trajectory or stop replaced the target
+            self._via, self._path_speed, self._path_velocity = [], 0.0, None
             return
         try:
-            self._commanded = ramp_toward(
-                commanded, target, self._max_joint_rad_s * float(step_size)
+            dt = float(step_size)
+            points = [*self._via, target]
+            remaining, previous = 0.0, commanded
+            for point in points:
+                remaining += max(abs(b - a) for a, b in zip(previous, point))
+                previous = point
+            advance, self._path_speed = profile_step(
+                remaining,
+                self._path_speed,
+                self._max_joint_rad_s,
+                self._max_joint_acceleration_rad_s2,
+                dt,
             )
+            position = commanded
+            while points:
+                segment = max(abs(b - a) for a, b in zip(position, points[0]))
+                position = ramp_toward(position, points[0], advance)
+                if position != points[0]:
+                    break
+                advance -= segment
+                points.pop(0)
+            self._via = points[:-1]
+            if dt > 0.0:
+                self._path_velocity = [(b - a) / dt for a, b in zip(commanded, position)]
+            self._commanded = position
             self._apply_commanded()
         except Exception:
             LOGGER.exception("arm %s ramp step failed", self._prim_path)

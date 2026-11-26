@@ -288,20 +288,22 @@ that plans around the store's contents can't plan with a held object, set
 reported by `GetEndPosition`, converted to Viam's orientation-vector
 convention), `move_timeout_sec`, and `arm_model` as a manifest label for custom
 USDs. `max_joint_deg_s` sets one positive finite speed limit, in degrees per
-second, for every configured arm joint. It limits how fast latched joint
-targets move (`MoveToJointPositions`, `MoveThroughJointPositions`,
-`set_joint_targets_radians`): joints move together along the straight
-joint-space segment, with the fastest joint running at the limit. It is also
-the velocity limit reported to trajectory parameterizers. Streamed trajectories
+second, for every configured arm joint (default `180`), and `max_joint_deg_s2`
+the acceleration limit in degrees per second squared (default `720`). Joint
+moves (`MoveToJointPositions`, `MoveThroughJointPositions`,
+`set_joint_targets_radians`) follow a trapezoidal speed profile under both:
+joints move together along the straight joint-space segments between
+waypoints, the fastest joint speeding up to the speed limit and slowing to a
+stop at the last waypoint. The simulator steps the motion, so a move takes the
+same simulated time whatever rate the sim runs at. Both limits are also
+reported to trajectory parameterizers. Streamed trajectories
 follow their own timestamps. Gripper joints on an integrated articulation are
 unchanged. `MoveThroughJointPositions` reads two keys from `extra`:
 `{"waitAtEnd": false}` returns without waiting for the arm to arrive, and
 `{"interpolate": false}` goes straight to the last waypoint. With both, as the
 motion service's teleop pipeline sends them, each call is a servo setpoint: it
 returns at once and the arm interpolates between successive setpoints.
-`max_joint_deg_s2` sets the
-positive finite per-joint acceleration limit reported to trajectory
-parameterizers. `is_moving_velocity_threshold_rad_s` sets the per-joint velocity
+`is_moving_velocity_threshold_rad_s` sets the per-joint velocity
 noise floor used by `IsMoving`; it defaults to `0.01` rad/s and must be finite
 and non-negative. `Stop` holds the measured position, except when no
 trajectory is running and every joint is within 2° of its current target: then

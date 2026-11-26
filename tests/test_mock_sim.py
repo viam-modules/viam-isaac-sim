@@ -14,7 +14,7 @@ from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Vector3
 from viam.utils import dict_to_struct
 
-from isaac_module.models.arm import IsaacArm, _densify
+from isaac_module.models.arm import IsaacArm
 from isaac_module.models.base import IsaacBase
 from isaac_module.models.camera import IsaacCamera
 from isaac_module.models.world import IsaacWorld
@@ -416,37 +416,6 @@ def test_mock_arms_share_a_prim_with_joint_subsets(world):
             )
 
     asyncio.run(scenario())
-
-
-def test_densify_pass_through_dense_input():
-    start = [0.0] * 6
-    wps = [[math.radians(0.5 * i)] * 6 for i in range(1, 5)]
-    out = _densify(start, wps, math.radians(2.0))
-    assert out == wps
-
-
-def test_densify_interpolates_sparse_input():
-    start = [0.0] * 6
-    wps = [[math.radians(30)] + [0.0] * 5]
-    out = _densify(start, wps, math.radians(2.0))
-    assert len(out) == 15  # 30° / 2°
-    prev = start
-    for step in out:
-        max_delta = max(abs(a - b) for a, b in zip(prev, step))
-        assert max_delta <= math.radians(2.0) + 1e-12
-        prev = step
-    assert out[-1] == pytest.approx(wps[-1])
-
-
-def test_densify_returns_final_target_exactly():
-    start = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
-    wps = [[0.5, 0.5, 0.5, 0.5, 0.5, 0.5], [0.7, 0.0, 0.0, 0.0, 0.0, 0.0]]
-    out = _densify(start, wps, math.radians(3.0))
-    assert out[-1] == pytest.approx(wps[-1])
-
-
-def test_densify_empty_input_returns_empty():
-    assert _densify([0.0] * 6, [], math.radians(2.0)) == []
 
 
 def test_arm_reconfigure_rejects_invalid_max_step_deg(world):

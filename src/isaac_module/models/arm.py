@@ -24,25 +24,21 @@ Attributes:
                                      all DOFs). Lets several arms share one
                                      prim_path, each owning a joint subset.
   move_timeout_sec (float)         - max time to wait for a move (default 30)
-  max_joint_deg_s (float)          - optional positive per-joint velocity limit: latched
-                                     joint targets ramp at this speed, and it is the
+  max_joint_deg_s (float)          - per-joint speed limit (default 180): moves
+                                     follow a trapezoidal speed profile with the
+                                     fastest joint at this speed, and it is the
                                      velocity limit reported to trajectory
                                      parameterizers
-  max_joint_deg_s2 (float)         - optional positive per-joint acceleration limit
-                                     reported for trajectory parameterization
+  max_joint_deg_s2 (float)         - per-joint acceleration limit of that
+                                     profile (default 720), also reported for
+                                     trajectory parameterization
   is_moving_velocity_threshold_rad_s (float) - velocity above which IsMoving
                                      reports true (default 0.01)
-  robot_control_freq_hz (float)    - rate at which MoveThroughJointPositions
-                                     streams waypoint targets (default 50Hz,
-                                     range (0, 1000])
+  robot_control_freq_hz (float)    - deprecated and ignored: moves are stepped
+                                     by the simulator's physics callback
   path_tolerance_delta_deg (float) - final-waypoint convergence tolerance
                                      (default 0.5)
-  path_max_step_deg (float)        - max per-joint delta between two pushed
-                                     targets; sparse waypoint pairs are
-                                     linearly interpolated so drives can
-                                     actually track them (default 2.0,
-                                     range (0, 30]); when max_joint_deg_s is
-                                     set, capped at max_joint_deg_s /
+  path_max_step_deg (float)        - deprecated and ignored, like
                                      robot_control_freq_hz
   kinematics_url (string)          - where to fetch the kinematics file served
                                      by GetKinematics (.json = SVA, .urdf =
@@ -113,29 +109,12 @@ _DEFAULT_TOLERANCE_DEG = 0.5
 _DEFAULT_CONTROL_FREQ_HZ = 50.0
 _MAX_CONTROL_FREQ_HZ = 1000.0
 _DEFAULT_MAX_STEP_DEG = 2.0
+# Used when the config sets no limit, so a simulated arm moves like a real one
+# instead of snapping to its target: a typical collaborative arm's joint speed,
+# reached in a quarter of a second.
+_DEFAULT_MAX_JOINT_DEG_S = 180.0
+_DEFAULT_MAX_JOINT_DEG_S2 = 720.0
 _MAX_MAX_STEP_DEG = 30.0
-
-
-def _densify(
-    start: Sequence[float],
-    waypoints: Sequence[Sequence[float]],
-    max_step_rad: float,
-) -> List[List[float]]:
-    """Linearly interpolate targets between consecutive waypoints so no single
-    step moves any joint by more than `max_step_rad`. First segment runs from
-    `start` (the arm's current joint positions) to `waypoints[0]`; the last
-    emitted target equals `waypoints[-1]` exactly."""
-    out: List[List[float]] = []
-    prev: List[float] = list(start)
-    for wp in waypoints:
-        target = list(wp)
-        max_delta = max((abs(a - b) for a, b in zip(prev, target)), default=0.0)
-        n = max(1, math.ceil(max_delta / max_step_rad))
-        for k in range(1, n + 1):
-            t = k / n
-            out.append([a + t * (b - a) for a, b in zip(prev, target)])
-        prev = target
-    return out
 
 
 def _move_flags(kwargs: Mapping[str, Any]) -> Tuple[bool, bool]:
@@ -257,15 +236,11 @@ class IsaacArm(Arm, EasyResource):
         self._attrs: Dict[str, Any] = {}
         self._move_timeout = 30.0
         self._tolerance_rad = math.radians(_DEFAULT_TOLERANCE_DEG)
-        self._control_period = 1.0 / _DEFAULT_CONTROL_FREQ_HZ
-        self._max_step_rad = math.radians(_DEFAULT_MAX_STEP_DEG)
         self._kinematics: Optional[Tuple[Any, ...]] = None
         self._chain: Optional[Dict[str, Any]] = None  # derived kinematics' chain, for Get3DModels
         self._models: Optional[Dict[str, bytes]] = None
         self._generation = 0  # bumped by reconfigure: a load started before it is stale
         self._moving_count = 0
-        # waitAtEnd=false interpolated stream still pushing targets
-        self._background: Optional[asyncio.Task] = None
 
     @classmethod
     def new(
@@ -312,28 +287,21 @@ class IsaacArm(Arm, EasyResource):
             raise ValueError(
                 f"robot_control_freq_hz must be in (0, {_MAX_CONTROL_FREQ_HZ}]; got {freq}"
             )
-        self._control_period = 1.0 / freq
         step_deg = float(attrs.get("path_max_step_deg", _DEFAULT_MAX_STEP_DEG))
         if step_deg <= 0 or step_deg > _MAX_MAX_STEP_DEG:
             raise ValueError(
                 f"path_max_step_deg must be in (0, {_MAX_MAX_STEP_DEG}]; got {step_deg}"
             )
-        self._max_step_rad = math.radians(step_deg)
         self._attrs = attrs
-        max_joint_deg_s = _max_joint_deg_s(attrs, config.name)
-        if max_joint_deg_s is not None:
-            # Don't stream targets faster than the handle ramps them.
-            self._max_step_rad = min(
-                self._max_step_rad, math.radians(max_joint_deg_s) * self._control_period
-            )
         attrs["is_moving_velocity_threshold_rad_s"] = (
             _is_moving_velocity_threshold(attrs, config.name)
         )
-        if max_joint_deg_s is not None:
-            attrs["max_joint_deg_s"] = max_joint_deg_s
-        max_joint_deg_s2 = _max_joint_deg_s2(attrs, config.name)
-        if max_joint_deg_s2 is not None:
-            attrs["max_joint_deg_s2"] = max_joint_deg_s2
+        attrs["max_joint_deg_s"] = (
+            _max_joint_deg_s(attrs, config.name) or _DEFAULT_MAX_JOINT_DEG_S
+        )
+        attrs["max_joint_deg_s2"] = (
+            _max_joint_deg_s2(attrs, config.name) or _DEFAULT_MAX_JOINT_DEG_S2
+        )
         initial_joint_positions_deg = _initial_joint_positions_deg(attrs, config.name)
         if initial_joint_positions_deg is not None:
             attrs["initial_joint_positions_deg"] = initial_joint_positions_deg
@@ -420,12 +388,6 @@ class IsaacArm(Arm, EasyResource):
             if abs(actual - target) > tolerance_rad
         )
 
-    def _cancel_background(self) -> None:
-        """A new move or Stop supersedes a waitAtEnd=false stream."""
-        task, self._background = self._background, None
-        if task is not None and not task.done():
-            task.cancel()
-
     async def move_to_joint_positions(
         self, positions: JointPositions, **kwargs
     ) -> None:
@@ -434,7 +396,6 @@ class IsaacArm(Arm, EasyResource):
             v / s for v, s in zip(positions.values, _scales(handle, len(positions.values)))
         ]
         wait_at_end, _ = _move_flags(kwargs)
-        self._cancel_background()
         if not wait_at_end:
             await asyncio.to_thread(handle.set_joint_targets, targets)
             return
@@ -459,18 +420,15 @@ class IsaacArm(Arm, EasyResource):
     async def move_through_joint_positions(
         self, positions: Sequence[JointPositions], *args, **kwargs
     ) -> None:
-        """Stream waypoint targets at `robot_control_freq_hz`. Sparse waypoint
-        pairs are linearly interpolated so no single pushed target moves any
-        joint by more than `path_max_step_deg`; otherwise drives would cut
-        corners past intermediate waypoints they cannot reach in one tick.
+        """Follow the waypoints under the arm's speed and acceleration limits
+        and stop at the last one; the simulator steps the motion, so it takes
+        the same simulated time whatever rate the sim runs at.
 
-        `extra` {"interpolate": false} skips that: the last waypoint is the
-        setpoint. With {"waitAtEnd": false} too (the RDK teleop pipeline), it
-        is handed to the sim as a servo setpoint and the call returns at once;
-        the arm interpolates between successive setpoints at physics rate.
-        {"waitAtEnd": false} alone returns without waiting for convergence; the
-        interpolated stream keeps running in the background until it ends or a
-        newer move or Stop replaces it."""
+        `extra` {"waitAtEnd": false} returns without waiting for the arm to
+        arrive; a newer move or Stop replaces the motion. {"interpolate":
+        false} goes straight to the last waypoint. Both together (the RDK
+        teleop pipeline) hand it to the sim as a servo setpoint: the call
+        returns at once and the arm interpolates between successive setpoints."""
         handle = self._h()
         raw = [
             [v / s for v, s in zip(wp.values, _scales(handle, len(wp.values)))]
@@ -479,47 +437,18 @@ class IsaacArm(Arm, EasyResource):
         if not raw:
             return
         wait_at_end, interpolate = _move_flags(kwargs)
-        self._cancel_background()
 
         if not interpolate and not wait_at_end:
-            # teleop stream: hand off the setpoint and return; the sim arm
-            # interpolates between setpoints at physics rate
             await asyncio.to_thread(handle.servo_target, raw[-1])
             return
-        if not interpolate:
-            await asyncio.to_thread(handle.set_joint_targets, raw[-1])
-            self._moving_count += 1
-            try:
-                await self._await_final(handle, raw)
-            finally:
-                self._moving_count -= 1
-            return
-
+        await asyncio.to_thread(handle.follow_path, raw if interpolate else raw[-1:])
         if not wait_at_end:
-            self._background = asyncio.create_task(self._push_stream(handle, raw))
             return
-
         self._moving_count += 1
         try:
-            await self._push_stream(handle, raw)
             await self._await_final(handle, raw)
         finally:
             self._moving_count -= 1
-
-    async def _push_stream(
-        self, handle: ArmHandle, raw: Sequence[Sequence[float]]
-    ) -> None:
-        start = await asyncio.to_thread(handle.get_joint_positions)
-        stream = _densify(start, raw, self._max_step_rad)
-
-        loop = asyncio.get_running_loop()
-        push_start = loop.time()
-        for i, targets in enumerate(stream):
-            await asyncio.to_thread(handle.set_joint_targets, targets)
-            target_time = push_start + (i + 1) * self._control_period
-            sleep_needed = target_time - loop.time()
-            if sleep_needed > 0:
-                await asyncio.sleep(sleep_needed)
 
     async def _await_final(
         self, handle: ArmHandle, raw: Sequence[Sequence[float]]
@@ -615,14 +544,14 @@ class IsaacArm(Arm, EasyResource):
         )
 
     async def stop(self, **kwargs) -> None:
-        self._cancel_background()
         await asyncio.to_thread(self._h().stop)
 
     async def is_moving(self) -> bool:
-        """True while a MoveTo* RPC is in flight or a waitAtEnd=false
-        stream is still pushing targets."""
-        background = self._background is not None and not self._background.done()
-        return self._moving_count > 0 or background
+        """True while a MoveTo* RPC is in flight or a waitAtEnd=false move
+        is still playing."""
+        if self._moving_count > 0:
+            return True
+        return self._handle is not None and self._handle.path_active()
 
     def _kinematics_url(self) -> Optional[str]:
         url = self._attrs.get("kinematics_url")
