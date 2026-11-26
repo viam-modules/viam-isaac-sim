@@ -518,8 +518,9 @@ def test_camera_returns_image(world):
         decoded = Image.open(BytesIO(img.data))
         assert decoded.size == (320, 240)
 
-        images, _meta = await cam.get_images()
+        images, meta = await cam.get_images()
         assert len(images) == 1
+        assert meta.captured_at.seconds > 0
 
         props = await cam.get_properties()
         assert props.supports_pcd is False
