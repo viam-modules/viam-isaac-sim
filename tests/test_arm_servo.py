@@ -1,6 +1,6 @@
 """Servo setpoints (teleop) and joint-position snapshots on IsaacArmHandle:
-neither waits for the sim thread once attached, and the arm interpolates
-between setpoints at physics rate instead of jumping to each one."""
+neither waits for the sim thread once attached, and each setpoint is applied
+on the next physics step."""
 
 import math
 
@@ -56,70 +56,26 @@ def test_first_setpoint_attaches_then_later_ones_skip_the_sim_thread(clock):
     assert sim.runs == runs
 
 
-def test_interpolates_to_setpoint_over_the_period(clock):
+def test_applies_the_newest_setpoint_on_the_next_step(clock):
     sim, art, h = _handle()
     h.set_joint_targets([0.0, 0.0])
-    h.servo_target([0.2, -0.2])
+    h.servo_target([0.1, 0.1])
+    h.servo_target([0.2, -0.2])  # newer one wins
     step = _servo_step(sim, h)
-    period = h._servo_period_s
-    step(period / 4)
-    assert art.actions[-1].joint_positions.tolist() == pytest.approx([0.05, -0.05])
-    step(period / 4)
-    assert h._commanded == pytest.approx([0.1, -0.1])
-    step(period)  # past the period: lands exactly on the setpoint
+    step(1 / 60)
+    assert art.actions[-1].joint_positions.tolist() == pytest.approx([0.2, -0.2])
     assert h._commanded == pytest.approx([0.2, -0.2])
     assert h._servo_goal is None
     actions = len(art.actions)
-    step(period)
+    step(1 / 60)
     assert len(art.actions) == actions  # idle once arrived
-
-
-def test_new_setpoint_continues_from_the_commanded_pose(clock):
-    sim, art, h = _handle()
-    h.set_joint_targets([0.0, 0.0])
-    h.servo_target([0.2, 0.0])
-    step = _servo_step(sim, h)
-    step(h._servo_period_s / 2)
-    assert h._commanded == pytest.approx([0.1, 0.0])
-    clock.now += 0.05
-    h.servo_target([0.1, 0.4])
-    step(h._servo_period_s / 2)
-    # halfway from (0.1, 0) to (0.1, 0.4): no jump back toward the old start
-    assert h._commanded == pytest.approx([0.1, 0.2])
-
-
-def test_period_tracks_setpoint_interval_and_ignores_long_gaps(clock):
-    sim, art, h = _handle()
-    for _ in range(40):
-        h.servo_target([0.0, 0.0])
-        clock.now += 0.07
-    assert h._servo_period_s == pytest.approx(0.07, rel=0.02)
-    clock.now += 5.0  # the operator paused: not a setpoint interval
-    h.servo_target([0.0, 0.0])
-    assert h._servo_period_s == pytest.approx(0.07, rel=0.02)
-    for _ in range(40):
-        clock.now += 1.0 / 30
-        h.servo_target([0.0, 0.0])
-    assert h._servo_period_s == pytest.approx(1.0 / 30, rel=0.02)
-
-
-def test_period_is_clamped(clock):
-    sim, art, h = _handle()
-    for _ in range(40):
-        h.servo_target([0.0, 0.0])
-        clock.now += 0.001
-    assert h._servo_period_s == sm.SERVO_MIN_PERIOD_S
-    for _ in range(40):
-        h.servo_target([0.0, 0.0])
-        clock.now += 0.29
-    assert h._servo_period_s == sm.SERVO_MAX_PERIOD_S
 
 
 def test_velocity_limit_caps_each_step(clock):
     sim, art, h = _handle(max_joint_deg_s=30.0)
     h.set_joint_targets([0.0, 0.0])
     h.servo_target([1.0, 0.0])
-    _servo_step(sim, h)(1.0)  # interpolation says arrive; the cap says 30 deg
+    _servo_step(sim, h)(1.0)  # the cap allows 30 deg in this step
     assert h._commanded == pytest.approx([math.radians(30.0), 0.0])
     assert h._servo_goal == [1.0, 0.0]  # keeps going next step
 
@@ -129,15 +85,14 @@ def test_blocking_targets_and_stop_cancel_servo_motion(clock):
     h.set_joint_targets([0.0, 0.0])
     h.servo_target([0.4, 0.4])
     step = _servo_step(sim, h)
-    step(h._servo_period_s / 4)
     h.set_joint_targets([-0.3, 0.0])
-    step(h._servo_period_s)
+    step(1 / 60)
     assert h._commanded == [-0.3, 0.0]
 
     h.servo_target([0.4, 0.4])
     h.stop()
     held = list(h._commanded)
-    step(h._servo_period_s)
+    step(1 / 60)
     assert h._commanded == held
 
 
