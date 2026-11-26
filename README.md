@@ -294,7 +294,12 @@ targets move (`MoveToJointPositions`, `MoveThroughJointPositions`,
 joint-space segment, with the fastest joint running at the limit. It is also
 the velocity limit reported to trajectory parameterizers. Streamed trajectories
 follow their own timestamps. Gripper joints on an integrated articulation are
-unchanged. `max_joint_deg_s2` sets the
+unchanged. `MoveThroughJointPositions` reads two keys from `extra`:
+`{"waitAtEnd": false}` returns without waiting for the arm to arrive, and
+`{"interpolate": false}` goes straight to the last waypoint. With both, as the
+motion service's teleop pipeline sends them, each call is a servo setpoint: it
+returns at once and the arm interpolates between successive setpoints.
+`max_joint_deg_s2` sets the
 positive finite per-joint acceleration limit reported to trajectory
 parameterizers. `is_moving_velocity_threshold_rad_s` sets the per-joint velocity
 noise floor used by `IsMoving`; it defaults to `0.01` rad/s and must be finite
