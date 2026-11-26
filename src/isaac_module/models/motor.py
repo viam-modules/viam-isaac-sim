@@ -125,13 +125,13 @@ class IsaacMotor(Motor, EasyResource):
         if revolutions == 0:
             handle.set_rpm(rpm)
             return
+        # The body stops the thruster on the physics step that reaches the
+        # target, so paired thrusters cut out together; this RPC only waits
+        # for that. Revolutions are integrated in simulator time, which runs
+        # slower than the wall clock when Isaac is rendering (and stops when
+        # it is paused), so wait on the odometry rather than on a sleep.
+        target = handle.go_for(rpm, revolutions)
         direction = 1.0 if (rpm > 0) == (revolutions > 0) else -1.0
-        speed = min(abs(rpm), handle.max_rpm)
-        target = handle.revolutions() + direction * abs(revolutions)
-        handle.set_rpm(direction * speed)
-        # Revolutions are integrated in simulator time, which runs slower
-        # than the wall clock when Isaac is rendering (and stops when it is
-        # paused), so wait on the odometry rather than on a wall-clock sleep.
         waiter = asyncio.ensure_future(self._wait_for_revolutions(target, direction))
         self._go_task = waiter
         try:
@@ -141,7 +141,6 @@ class IsaacMotor(Motor, EasyResource):
         finally:
             if self._go_task is waiter:
                 self._go_task = None
-        handle.stop()
 
     async def _wait_for_revolutions(self, target: float, direction: float) -> None:
         handle = self._h()
@@ -151,6 +150,7 @@ class IsaacMotor(Motor, EasyResource):
         while True:
             revolutions = handle.revolutions()
             if (revolutions - target) * direction >= 0.0:
+                handle.stop()  # the physics thread already has; idempotent
                 return
             await asyncio.sleep(GO_FOR_POLL_S)
             # a paused simulator never advances; give up after a while

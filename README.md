@@ -200,7 +200,7 @@ origin), since the module can't resolve the parent's pose.
 | `render_quality` | `"default"` | `"performance"` applies the rendering settings from Isaac Lab v2.2.0's performance.kit: reflections, translucency, ambient occlusion and DLSS frame generation off; indirect diffuse on; non-sampled direct lighting; DLSS in performance mode. It mainly speeds up the viewport: about 10% faster with `livestream` on, and no measurable gain headless without a livestream, where the viewport is already off. Camera images change slightly, so don't switch it mid-dataset |
 | `kit_settings` | `{}` | carb settings applied at boot, e.g. `{"/rtx/reflections/enabled": false}`. Keys are carb paths starting with `/` whose segments use letters, digits, `_`, `.` or `-`; values are bools, numbers or strings (strings can't contain spaces or `=`), and override `render_quality`. Each is logged with its value before and after, and unknown paths are warned about |
 | `camera_idle_sec` | `0` (off) | `0` or at least `0.5`. Stop rendering a camera nobody has read for this many seconds. Each unread camera otherwise renders every step (about 11-17 ms each on a cloud GPU). The next read waits three rendered frames for a fresh image. World `status` lists each camera's `paused` and `last_read_s_ago`. Cameras recording an episode never pause, and paused cameras are resumed before an episode starts |
-| `water` | _none_ | `{"level_m": 0, "size_m": 400, "depth_m": 10, "color": [r,g,b]}`: a flat water surface for floating props. Replaces the default ground plane with a visual surface (no collision) at `level_m` and a seabed collider `depth_m` below it |
+| `water` | _none_ | `{"level_m": 0, "size_m": 400, "depth_m": 10, "color": [r,g,b], "roughness": 0.6}`: a flat water surface for floating props (`roughness` 0 is a mirror that reflects the sun into overhead cameras, 1 is matte). Replaces the default ground plane with a visual surface (no collision) at `level_m` and a seabed collider `depth_m` below it |
 | `world_state_store` | `"world_state_store"` | name of a world state store service to publish props to; see [World state store](#world-state-store). Nothing is published unless that service is in the machine config; `""` turns publishing off |
 | `world_state_sync_hz` | `5` | how often prop poses are sent to the store. The world logs a warning when syncs keep taking more than half of that period |
 | `world_state_render` | `"colliders"` | `"colliders"`: each prop is published as a box, sphere or capsule. `"both"`: `usd` props also publish their mesh. `"models"`: as `"both"`, with the primitive hidden by default |
@@ -801,6 +801,18 @@ The defaults suit a ~1 m unmanned surface vessel: with two 49 N thrusters a
 / `park_props` commands work on a floating prop (`set_prop_pose` also stops it),
 which is how a docking attempt is reset to a known approach.
 
+#### A real marina from OpenStreetMap
+
+`examples/osm_marina/osm_to_props.py` turns OSM pier, marina and coastline
+ways into world props: fixed piers get a raised deck on pilings with a wave
+screen, floating docks sit at the waterline, unnamed floating ways become
+finger piers, and the coastline becomes a seawall. It anchors the sim's
++X east / +Y north frame at the marina polygon's centroid and prints that as
+the `origin` for a `movement_sensor`, so `GetPosition` reports real lat/lon.
+`79th-street-boat-basin.osm.json` is the input for Manhattan's 79th Street
+Boat Basin (A, B and C docks, ~50 finger piers), fetched from the OSM map
+API and filtered to waterfront features.
+
 #### motor (thruster) attributes
 
 `world` and `prop` (or `prim_path`) are required. `position` (meters, body
@@ -811,7 +823,11 @@ default `[1, 0, 0]`) which way at full forward power. `max_thrust_n` (default
 `SetRPM` and the odometry: the thruster has no encoder, so `GetPosition`
 integrates the commanded rpm in simulator time, and `GoFor` / `GoTo` wait on
 that odometry (not the wall clock), so they stay correct when Isaac runs
-slower than real time and time out if it is paused. `SetPower` is the real control. Two
+slower than real time and time out if it is paused. The physics step that
+reaches a `GoFor` target cuts the thrust itself, so two thrusters commanded
+together (a `MoveStraight` on the base) stop on the same step instead of
+whenever each RPC handler next polls, which would yaw a light hull several
+degrees at the end of every straight run. `SetPower` is the real control. Two
 thrusters either side of the centerline steer by differential thrust, and
 `rdk:builtin:wheeled` drives them as a `base` for the app's control tab and
 the navigation service.
